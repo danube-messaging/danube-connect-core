@@ -47,10 +47,10 @@ Core SDK for building high-performance connectors for the [Danube messaging syst
 - Schema info available via `record.schema()`
 
 **For Source Connectors:**
-- Create `SourceRecord` with typed `serde_json::Value` data
+- Create `SourceRecord` with typed data using helper methods
 - Runtime serializes based on topic's configured schema
 - Automatic schema registration and validation
-- Support for JSON Schema, String, Bytes, Number (Avro & Protobuf coming soon)
+- Support for JSON Schema, String, Bytes, Number, and Avro (Protobuf coming soon)
 
 **Benefits:**
 - ✅ Zero schema boilerplate in connector code
@@ -71,22 +71,37 @@ Both `SinkRuntime` and `SourceRuntime` handle:
 
 ### Configuration
 
-Connectors use TOML configuration files with environment variable overrides:
+Connectors can be configured in two ways:
 
-**Core settings:**
-- Danube broker URL and connector name
-- Retry and processing behavior
-- Metrics and logging configuration
-
-**Schema registry configuration:**
+**1. TOML Configuration** (recommended for standalone connectors):
 ```toml
+danube_service_url = "http://localhost:6650"
+connector_name = "my-connector"
+
 [[schemas]]
 topic = "/events/users"
 subject = "user-events-schema"
 schema_type = "json_schema"
 schema_file = "schemas/user-event.json"
 version_strategy = "latest"  # or "pinned" or "minimum"
+
+# Include connector-specific settings
+[mqtt]
+broker = "mqtt://localhost:1883"
 ```
+
+**2. Programmatic Configuration** (for embedding in applications):
+```rust
+let config = ConnectorConfig {
+    danube_service_url: "http://localhost:6650".to_string(),
+    connector_name: "my-connector".to_string(),
+    retry: RetrySettings::default(),
+    processing: ProcessingSettings::default(),
+    schemas: vec![/* schema mappings */],
+};
+```
+
+See **[Programmatic Configuration Guide](./programmatic_config.md)** for complete details.
 
 The runtime automatically:
 - Loads schema definitions from files
@@ -106,6 +121,9 @@ The runtime automatically:
 - `new(topic, payload)` - Create from `serde_json::Value`
 - `from_json(topic, data)` - Create from any serializable type
 - `from_string(topic, text)` - Create from string
+- `from_number(topic, number)` - Create from numeric value
+- `from_avro(topic, data)` - Create from Avro-compatible struct
+- `from_bytes(topic, data)` - Create from binary data
 - `with_attribute()`, `with_key()` - Add metadata
 
 ### Utilities
@@ -132,6 +150,7 @@ async-trait = "0.1"
 - 📖 **[Connector Overview](https://danube-docs.dev-state.com/integrations/danube_connect_overview/)** - Introduction and key concepts
 - 🏗️ **[Architecture Guide](https://danube-docs.dev-state.com/integrations/danube_connect_architecture/)** - Design, patterns, and schema registry
 - 🛠️ **[Development Guide](https://danube-docs.dev-state.com/integrations/danube_connect_development/)** - Build your own connector with schema registry
+- ⚙️ **[Programmatic Configuration](./programmatic_config.md)** - Use connectors in your application without TOML files
 
 ### API Reference
 

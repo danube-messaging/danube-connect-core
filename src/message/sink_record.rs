@@ -139,10 +139,13 @@ impl SinkRecord {
                     })
                 }
                 "avro" => {
-                    // TODO: Implement Avro deserialization
-                    return Err(ConnectorError::config(
-                        "Avro deserialization not yet implemented",
-                    ));
+                    // Avro in Danube uses JSON serialization with schema validation
+                    serde_json::from_slice(&message.payload).map_err(|e| {
+                        ConnectorError::invalid_data(
+                            format!("Avro (JSON) deserialization failed: {}", e),
+                            message.payload.clone(),
+                        )
+                    })?
                 }
                 "protobuf" => {
                     // TODO: Implement Protobuf deserialization

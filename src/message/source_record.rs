@@ -34,15 +34,109 @@ impl SourceRecord {
     }
 
     /// Create a SourceRecord from a string payload
+    ///
+    /// Use this for text-based data like log messages, plain text, or string values.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let record = SourceRecord::from_string("/logs/application", "Server started successfully");
+    /// let record = SourceRecord::from_string("/events/notifications", format!("User {} logged in", user_id));
+    /// ```
     pub fn from_string(topic: impl Into<String>, payload: impl Into<String>) -> Self {
         Self::new(topic, json!(payload.into()))
     }
 
     /// Create a SourceRecord from any JSON-serializable object
+    ///
+    /// Use this for structured data types that implement `Serialize`.
+    /// The data will be converted to `serde_json::Value`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// #[derive(Serialize)]
+    /// struct OrderEvent {
+    ///     order_id: String,
+    ///     amount: f64,
+    ///     currency: String,
+    /// }
+    ///
+    /// let order = OrderEvent {
+    ///     order_id: "ORD-12345".to_string(),
+    ///     amount: 99.99,
+    ///     currency: "USD".to_string(),
+    /// };
+    ///
+    /// let record = SourceRecord::from_json("/orders/created", &order)?;
+    /// ```
     pub fn from_json<T: Serialize>(topic: impl Into<String>, data: T) -> ConnectorResult<Self> {
         let value =
             serde_json::to_value(data).map_err(|e| ConnectorError::Serialization(e.to_string()))?;
         Ok(Self::new(topic, value))
+    }
+
+    /// Create a SourceRecord from a numeric value
+    ///
+    /// Supports integers and floats. The value will be stored as a JSON number.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let record = SourceRecord::from_number("/metrics/counter", 42);
+    /// let record = SourceRecord::from_number("/metrics/temperature", 23.5);
+    /// ```
+    pub fn from_number<T: Serialize>(topic: impl Into<String>, number: T) -> ConnectorResult<Self> {
+        let value = serde_json::to_value(number)
+            .map_err(|e| ConnectorError::Serialization(e.to_string()))?;
+        
+        // Ensure it's actually a number
+        if !value.is_number() {
+            return Err(ConnectorError::Serialization(
+                "Value is not a number".to_string(),
+            ));
+        }
+        
+        Ok(Self::new(topic, value))
+    }
+
+    /// Create a SourceRecord from an Avro-compatible struct
+    ///
+    /// In Danube, Avro schemas use JSON serialization with schema validation.
+    /// This is an alias for `from_json()` for clarity when working with Avro schemas.
+    ///
+    /// # Example
+    /// ```ignore
+    /// #[derive(Serialize)]
+    /// struct UserEvent {
+    ///     user_id: String,
+    ///     action: String,
+    ///     timestamp: i64,
+    /// }
+    ///
+    /// let event = UserEvent { ... };
+    /// let record = SourceRecord::from_avro("/events/users", &event)?;
+    /// ```
+    pub fn from_avro<T: Serialize>(topic: impl Into<String>, data: T) -> ConnectorResult<Self> {
+        // Avro in Danube uses JSON serialization
+        Self::from_json(topic, data)
+    }
+
+    /// Create a SourceRecord from binary data (base64-encoded)
+    ///
+    /// The bytes will be base64-encoded and stored as a JSON object.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let binary_data = vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]; // "Hello"
+    /// let record = SourceRecord::from_bytes("/binary/data", binary_data);
+    /// ```
+    pub fn from_bytes(topic: impl Into<String>, data: Vec<u8>) -> Self {
+        let base64_data = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
+        Self::new(
+            topic,
+            json!({
+                "data": base64_data,
+                "size": data.len()
+            }),
+        )
     }
 
     /// Add an attribute
@@ -119,10 +213,10 @@ impl SourceRecord {
                 }
             }
             "avro" => {
-                // TODO: Implement Avro serialization
-                Err(ConnectorError::config(
-                    "Avro serialization not yet implemented",
-                ))
+                // Avro in Danube uses JSON serialization with schema validation
+                serde_json::to_vec(&self.payload).map_err(|e| {
+                    ConnectorError::Serialization(format!("Avro (JSON) serialization failed: {}", e))
+                })
             }
             "protobuf" => {
                 // TODO: Implement Protobuf serialization
@@ -199,5 +293,62 @@ mod tests {
         );
         assert_eq!(record.attributes.get("version"), Some(&"1.0".to_string()));
         assert_eq!(record.key, Some("user-123".to_string()));
+    }
+
+    #[test]
+    fn test_source_record_from_number() {
+        // Integer
+        let record = SourceRecord::from_number("/metrics/counter", 42).unwrap();
+        assert_eq!(record.payload, json!(42));
+        assert_eq!(record.payload.as_i64().unwrap(), 42);
+
+        // Float
+        let record = SourceRecord::from_number("/metrics/temperature", 23.5).unwrap();
+        assert_eq!(record.payload.as_f64().unwrap(), 23.5);
+
+        // Negative number
+        let record = SourceRecord::from_number("/metrics/balance", -100).unwrap();
+        assert_eq!(record.payload.as_i64().unwrap(), -100);
+    }
+
+    #[test]
+    fn test_source_record_from_avro() {
+        #[derive(Serialize)]
+        struct UserEvent {
+            user_id: String,
+            action: String,
+            timestamp: i64,
+        }
+
+        let event = UserEvent {
+            user_id: "user-123".to_string(),
+            action: "login".to_string(),
+            timestamp: 1234567890,
+        };
+
+        let record = SourceRecord::from_avro("/events/users", &event).unwrap();
+        assert_eq!(record.payload["user_id"], "user-123");
+        assert_eq!(record.payload["action"], "login");
+        assert_eq!(record.payload["timestamp"], 1234567890);
+    }
+
+    #[test]
+    fn test_source_record_from_bytes() {
+        let data = vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]; // "Hello"
+        let record = SourceRecord::from_bytes("/binary/data", data.clone());
+
+        // Check the structure
+        assert!(record.payload.is_object());
+        assert!(record.payload["data"].is_string());
+        assert_eq!(record.payload["size"], 5);
+
+        // Verify base64 encoding
+        let base64_data = record.payload["data"].as_str().unwrap();
+        let decoded = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            base64_data,
+        )
+        .unwrap();
+        assert_eq!(decoded, data);
     }
 }
