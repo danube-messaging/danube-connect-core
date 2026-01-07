@@ -1,24 +1,19 @@
 # Running Examples
 
-**Updated for v0.7.0 Schema-First API**
+**Updated for Schema-First API**
 
 The examples are designed to work out-of-the-box with sensible defaults, but can also be customized via environment variables.
-
-## What's New in v0.7.0
-
-These examples demonstrate the new **schema-first** API where:
-- **Source connectors** emit typed data (`serde_json::Value`) instead of raw bytes
-- **Sink connectors** receive typed data automatically deserialized by the runtime
-- Schema registry integration is optional but recommended for type safety
 
 ## Examples Overview
 
 ### Simple Examples (No Schema Registry)
+
 - `simple_source.rs` + `simple_sink.rs` - Work without schema registry (backward compatible)
 - Runtime uses JSON serialization as fallback
 - Sink must check payload type at runtime
 
 ### Schema-Aware Examples (With Schema Registry)
+
 - `schema_source.rs` + `schema_sink.rs` - Use schema registry for type safety
 - Source declares schema type (`String`) in configuration
 - Runtime auto-registers schema and attaches schema_id to messages
@@ -45,6 +40,7 @@ docker-compose ps
 The broker will be available at `http://localhost:6650`.
 
 To stop the broker:
+
 ```bash
 cd docker
 docker-compose down
@@ -62,6 +58,7 @@ cargo run --example simple_source
 ```
 
 This will:
+
 - Connect to `http://localhost:6650` (default Danube broker)
 - Create the `/default/test` topic (if it doesn't exist)
 - Generate 100 test messages
@@ -77,6 +74,7 @@ cargo run --example simple_sink
 ```
 
 This will:
+
 - Connect to `http://localhost:6650` (default Danube broker)
 - Subscribe to `/default/test` topic
 - Print all received messages to stdout
@@ -106,7 +104,8 @@ cargo run --example simple_source
 ## Example Output
 
 ### Simple Sink
-```
+
+```bash
 Using default configuration for testing
 To use custom settings, set environment variables:
   DANUBE_SERVICE_URL (default: http://localhost:6650)
@@ -130,12 +129,14 @@ Attributes:
 ```
 
 **Key Changes:**
+
 - Payload is now typed data (detects string, JSON object, array, etc.)
 - Schema info is displayed (None for this simple example)
 - Runtime handles all deserialization automatically
 
 ### Simple Source
-```
+
+```bash
 Using default configuration for testing
 To use custom settings, set environment variables:
   DANUBE_SERVICE_URL (default: http://localhost:6650)
@@ -164,6 +165,7 @@ cargo run --example schema_source
 ```
 
 This will:
+
 - Connect to schema registry (embedded in Danube broker)
 - Auto-register "test-schema-value" subject with String type
 - Generate 50 test messages with schema metadata
@@ -178,6 +180,7 @@ cargo run --example schema_sink
 ```
 
 This will:
+
 - Validate incoming messages match "test-schema-value" subject
 - Runtime fetches schema by ID (cached for performance)
 - Deserializes payload based on schema type (String)
@@ -186,7 +189,8 @@ This will:
 ### Schema Example Output
 
 **Schema Sink:**
-```
+
+```bash
 === Message #1 ===
 Topic: /default/test-schema
 Offset: 0
@@ -204,6 +208,7 @@ Attributes:
 ```
 
 **Key Differences from Simple Example:**
+
 - ✓ Schema is validated (subject and version shown)
 - ✓ Runtime knows type is String (no need to check `as_str()`, `as_object()`, etc.)
 - ✓ Type safety enforced - mismatched schemas are rejected
@@ -214,11 +219,13 @@ Attributes:
 ## When to Use Which Example?
 
 **Use Simple Examples:**
+
 - Quick testing without schema registry
 - Prototyping connectors
 - Backward compatibility with systems that don't support schemas
 
 **Use Schema-Aware Examples:**
+
 - Production deployments
 - Type safety requirements
 - Working with structured data (JSON Schema, Avro, Protobuf)
