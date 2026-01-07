@@ -43,6 +43,7 @@ impl RetryConfig {
     }
 
     /// Create linear backoff configuration
+    #[allow(dead_code)]
     pub(crate) fn linear(max_retries: u32, backoff_ms: u64) -> Self {
         Self {
             max_retries,
@@ -54,6 +55,7 @@ impl RetryConfig {
     }
 
     /// Create fixed delay configuration
+    #[allow(dead_code)]
     pub(crate) fn fixed(max_retries: u32, delay_ms: u64) -> Self {
         Self {
             max_retries,
@@ -65,12 +67,14 @@ impl RetryConfig {
     }
 
     /// Disable jitter
+    #[allow(dead_code)]
     pub fn without_jitter(mut self) -> Self {
         self.jitter = false;
         self
     }
 
     /// Set custom multiplier
+    #[allow(dead_code)]
     pub fn with_multiplier(mut self, multiplier: f64) -> Self {
         self.multiplier = multiplier;
         self
@@ -103,11 +107,13 @@ impl RetryStrategy {
     }
 
     /// Create a linear backoff strategy
+    #[allow(dead_code)]
     pub(crate) fn linear_backoff(max_retries: u32, backoff_ms: u64) -> Self {
         Self::new(RetryConfig::linear(max_retries, backoff_ms))
     }
 
     /// Create a fixed delay strategy
+    #[allow(dead_code)]
     pub(crate) fn fixed_delay(max_retries: u32, delay_ms: u64) -> Self {
         Self::new(RetryConfig::fixed(max_retries, delay_ms))
     }
@@ -141,6 +147,7 @@ impl RetryStrategy {
     }
 
     /// Get the maximum number of retries
+    #[allow(dead_code)]
     pub(crate) fn max_retries(&self) -> u32 {
         self.config.max_retries
     }

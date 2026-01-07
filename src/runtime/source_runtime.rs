@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 /// Runtime for Source Connectors (External System → Danube)
 ///
@@ -131,85 +131,6 @@ impl<C: SourceConnector> SourceRuntime<C> {
         let schema_registry = crate::schema::SchemaRegistry::new(self.context.clone());
         self.schema_configs = schema_registry.initialize(&self.config.schemas).await?;
         Ok(())
-    }
-
-    /// Serialize payload value based on schema type
-    ///
-    /// Converts serde_json::Value to bytes according to the schema type.
-    /// The actual schema validation happens in the broker.
-    fn serialize_with_schema(
-        &self,
-        payload: &serde_json::Value,
-        schema_type: &str,
-    ) -> ConnectorResult<Vec<u8>> {
-        match schema_type.to_lowercase().as_str() {
-            "json_schema" | "json" => {
-                // JSON Schema - serialize as JSON
-                serde_json::to_vec(payload).map_err(|e| {
-                    ConnectorError::Serialization(format!("JSON serialization failed: {}", e))
-                })
-            }
-            "string" => {
-                // String type - convert to UTF-8 bytes
-                if let Some(s) = payload.as_str() {
-                    Ok(s.as_bytes().to_vec())
-                } else {
-                    // If not a string, serialize as JSON string
-                    Ok(payload.to_string().into_bytes())
-                }
-            }
-            "number" => {
-                // Number - serialize as JSON number
-                serde_json::to_vec(payload).map_err(|e| {
-                    ConnectorError::Serialization(format!("Number serialization failed: {}", e))
-                })
-            }
-            "bytes" => {
-                // Bytes - try to extract from base64 string or object
-                if let Some(s) = payload.as_str() {
-                    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s).map_err(
-                        |e| ConnectorError::Serialization(format!("Invalid base64: {}", e)),
-                    )
-                } else if let Some(obj) = payload.as_object() {
-                    if let Some(data) = obj.get("data").and_then(|v| v.as_str()) {
-                        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data)
-                            .map_err(|e| {
-                                ConnectorError::Serialization(format!("Invalid base64: {}", e))
-                            })
-                    } else {
-                        Err(ConnectorError::Serialization(
-                            "Expected 'data' field with base64 string".to_string(),
-                        ))
-                    }
-                } else {
-                    Err(ConnectorError::Serialization(
-                        "Cannot convert to bytes".to_string(),
-                    ))
-                }
-            }
-            "avro" => {
-                // TODO: Implement Avro serialization
-                Err(ConnectorError::config(
-                    "Avro serialization not yet implemented",
-                ))
-            }
-            "protobuf" => {
-                // TODO: Implement Protobuf serialization
-                Err(ConnectorError::config(
-                    "Protobuf serialization not yet implemented",
-                ))
-            }
-            _ => {
-                // Unknown type - default to JSON
-                warn!(
-                    "Unknown schema type '{}', defaulting to JSON serialization",
-                    schema_type
-                );
-                serde_json::to_vec(payload).map_err(|e| {
-                    ConnectorError::Serialization(format!("JSON serialization failed: {}", e))
-                })
-            }
-        }
     }
 
     /// Create all producers upfront based on connector configuration
@@ -349,10 +270,9 @@ impl<C: SourceConnector> SourceRuntime<C> {
             let topic = &record.topic;
 
             // Serialize payload based on schema (if configured)
-            // Do this BEFORE getting mutable borrow of producers
             let payload_bytes = if let Some(schema_cfg) = self.schema_configs.get(topic) {
                 debug!("Serializing with schema type: {}", schema_cfg.schema_type);
-                self.serialize_with_schema(&record.payload, &schema_cfg.schema_type)?
+                record.serialize_with_schema(&schema_cfg.schema_type)?
             } else {
                 // No schema - serialize as JSON
                 debug!("No schema configured, serializing as JSON");

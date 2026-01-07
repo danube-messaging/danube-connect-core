@@ -308,5 +308,3 @@ docker-compose restart broker1
 3. Add integration tests in the connector's `tests/` directory
 4. Document connector-specific configuration
 5. Add connector to the main repository
-
-See `info/connector-development-guide.md` for detailed connector development instructions.

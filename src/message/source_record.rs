@@ -4,6 +4,7 @@ use crate::{ConnectorError, ConnectorResult};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use tracing::warn;
 
 /// Record passed from source connectors (External System → Danube)
 ///
@@ -65,6 +66,81 @@ impl SourceRecord {
     /// Get the payload as a reference
     pub fn payload(&self) -> &Value {
         &self.payload
+    }
+
+    /// Serialize payload to bytes based on schema type
+    ///
+    /// Converts serde_json::Value to bytes according to the schema type.
+    /// The actual schema validation happens in the broker.
+    pub(crate) fn serialize_with_schema(&self, schema_type: &str) -> ConnectorResult<Vec<u8>> {
+        match schema_type.to_lowercase().as_str() {
+            "json_schema" | "json" => {
+                // JSON Schema - serialize as JSON
+                serde_json::to_vec(&self.payload).map_err(|e| {
+                    ConnectorError::Serialization(format!("JSON serialization failed: {}", e))
+                })
+            }
+            "string" => {
+                // String type - convert to UTF-8 bytes
+                if let Some(s) = self.payload.as_str() {
+                    Ok(s.as_bytes().to_vec())
+                } else {
+                    // If not a string, serialize as JSON string
+                    Ok(self.payload.to_string().into_bytes())
+                }
+            }
+            "number" => {
+                // Number - serialize as JSON number
+                serde_json::to_vec(&self.payload).map_err(|e| {
+                    ConnectorError::Serialization(format!("Number serialization failed: {}", e))
+                })
+            }
+            "bytes" => {
+                // Bytes - try to extract from base64 string or object
+                if let Some(s) = self.payload.as_str() {
+                    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s).map_err(
+                        |e| ConnectorError::Serialization(format!("Invalid base64: {}", e)),
+                    )
+                } else if let Some(obj) = self.payload.as_object() {
+                    if let Some(data) = obj.get("data").and_then(|v| v.as_str()) {
+                        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data)
+                            .map_err(|e| {
+                                ConnectorError::Serialization(format!("Invalid base64: {}", e))
+                            })
+                    } else {
+                        Err(ConnectorError::Serialization(
+                            "Expected 'data' field with base64 string".to_string(),
+                        ))
+                    }
+                } else {
+                    Err(ConnectorError::Serialization(
+                        "Cannot convert to bytes".to_string(),
+                    ))
+                }
+            }
+            "avro" => {
+                // TODO: Implement Avro serialization
+                Err(ConnectorError::config(
+                    "Avro serialization not yet implemented",
+                ))
+            }
+            "protobuf" => {
+                // TODO: Implement Protobuf serialization
+                Err(ConnectorError::config(
+                    "Protobuf serialization not yet implemented",
+                ))
+            }
+            _ => {
+                // Unknown type - default to JSON
+                warn!(
+                    "Unknown schema type '{}', defaulting to JSON serialization",
+                    schema_type
+                );
+                serde_json::to_vec(&self.payload).map_err(|e| {
+                    ConnectorError::Serialization(format!("JSON serialization failed: {}", e))
+                })
+            }
+        }
     }
 }
 
