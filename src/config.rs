@@ -1,6 +1,6 @@
 //! Configuration management for connectors.
 
-use crate::{ConnectorError, ConnectorResult, VersionStrategy};
+use crate::{ConnectorError, ConnectorResult};
 use danube_client::SubType;
 use serde::{Deserialize, Serialize};
 use std::env;
@@ -8,9 +8,14 @@ use std::path::PathBuf;
 
 /// Main configuration for connectors
 ///
+/// Can be created via:
+/// - `ConnectorConfig::from_env()` - load from environment variables
+/// - `ConnectorConfig::from_file()` - load from TOML file
+/// - Direct construction in code for full programmatic control
+///
 /// # Structure
-/// - **Mandatory fields** (from environment): `danube_service_url`, `connector_name`
-/// - **Optional fields** (from config file or defaults): `retry`, `processing`, `schemas`
+/// - **Mandatory fields**: `danube_service_url`, `connector_name`
+/// - **Optional fields**: `retry`, `processing`, `schemas` (with defaults)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectorConfig {
     /// Danube broker service URL (mandatory, from DANUBE_SERVICE_URL env var)
@@ -82,7 +87,9 @@ impl ConnectorConfig {
     }
 
     /// Validate the configuration
-    pub fn validate(&self) -> ConnectorResult<()> {
+    ///
+    /// Called internally by the runtime. Users can also call this for early validation.
+    pub(crate) fn validate(&self) -> ConnectorResult<()> {
         if self.danube_service_url.is_empty() {
             return Err(ConnectorError::config("danube_service_url cannot be empty"));
         }
@@ -116,6 +123,10 @@ impl Default for ConnectorConfig {
 }
 
 /// Retry configuration settings
+///
+/// Can be used via:
+/// - TOML config file: `[retry]` section
+/// - Direct construction in code for programmatic control
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetrySettings {
     /// Maximum number of retries for failed operations
@@ -152,6 +163,10 @@ impl Default for RetrySettings {
 }
 
 /// Processing and runtime configuration settings
+///
+/// Can be used via:
+/// - TOML config file: `[processing]` section
+/// - Direct construction in code for programmatic control
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessingSettings {
     /// Batch size for batch processing
@@ -205,25 +220,29 @@ impl Default for ProcessingSettings {
 
 /// Schema mapping configuration for topics
 ///
-/// Maps a topic to its schema definition for source connectors using schema registry
+/// Maps a topic to its schema definition for source connectors using schema registry.
+///
+/// Can be used via:
+/// - TOML config file: `[[schemas]]` array
+/// - Direct construction in code for programmatic control
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaMapping {
     /// Danube topic name (format: /{namespace}/{topic_name})
     pub topic: String,
-    
+
     /// Schema subject name in the registry
     pub subject: String,
-    
+
     /// Schema type (e.g., "json_schema", "avro", "protobuf")
     pub schema_type: String,
-    
+
     /// Path to schema definition file
     pub schema_file: PathBuf,
-    
+
     /// Auto-register schema on startup if it doesn't exist
     #[serde(default = "default_auto_register")]
     pub auto_register: bool,
-    
+
     /// Version strategy for this schema
     #[serde(default)]
     pub version_strategy: VersionStrategy,
@@ -233,7 +252,11 @@ fn default_auto_register() -> bool {
     true
 }
 
-/// Subscription type for configuration (mirrors SubType but with Serialize/Deserialize)
+/// Subscription type for configuration
+///
+/// **Mandatory public API** - required for `ConsumerConfig`.
+///
+/// Mirrors `SubType` from danube-client but with Serialize/Deserialize for config files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SubscriptionType {
     Exclusive,
@@ -249,6 +272,114 @@ impl From<SubscriptionType> for SubType {
             SubscriptionType::FailOver => SubType::FailOver,
         }
     }
+}
+
+/// Configuration for a Danube consumer
+///
+/// **Mandatory public API** - required by `SinkConnector::consumer_configs()` trait.
+///
+/// Specifies how to create a consumer for a specific topic, including subscription settings.
+#[derive(Debug, Clone)]
+pub struct ConsumerConfig {
+    /// Danube topic to consume from (format: /{namespace}/{topic_name})
+    pub topic: String,
+    /// Consumer name (for identification)
+    pub consumer_name: String,
+    /// Subscription name (shared across consumer instances)
+    pub subscription: String,
+    /// Subscription type (Exclusive, Shared, FailOver)
+    pub subscription_type: SubscriptionType,
+    /// Optional: Expected schema subject for validation
+    /// If set, runtime will validate that incoming messages match this schema
+    pub expected_schema_subject: Option<String>,
+}
+
+/// Configuration for a Danube producer
+///
+/// **Mandatory public API** - required by `SourceConnector::producer_configs()` trait.
+///
+/// Specifies how to create a producer for a specific topic, including partitioning
+/// and reliability settings.
+///
+/// Note: The `schema_config` field is internal and populated by the runtime from `SchemaMapping`.
+/// Always use `ProducerConfig::new()` or set `schema_config` to `None` when constructing manually.
+#[derive(Debug, Clone)]
+pub struct ProducerConfig {
+    /// Danube topic name (format: /{namespace}/{topic_name})
+    pub topic: String,
+    /// Number of partitions (0 = non-partitioned)
+    pub partitions: usize,
+    /// Use reliable dispatch (WAL + Cloud persistence)
+    pub reliable_dispatch: bool,
+    /// Internal: Schema configuration (populated by runtime from SchemaMapping)
+    /// Users should not set this - always use None
+    pub schema_config: Option<SchemaConfig>,
+}
+
+impl ProducerConfig {
+    /// Create a new ProducerConfig
+    pub fn new(topic: impl Into<String>, partitions: usize, reliable_dispatch: bool) -> Self {
+        Self {
+            topic: topic.into(),
+            partitions,
+            reliable_dispatch,
+            schema_config: None,
+        }
+    }
+}
+
+/// Schema configuration for a topic
+///
+/// Can be used via:
+/// - TOML config file: Use `SchemaMapping` in `[[schemas]]` (recommended)
+/// - Direct construction in code for advanced programmatic control
+///
+/// Note: Usually populated automatically from `SchemaMapping` by the runtime.
+///
+/// The runtime converts `SchemaMapping` → `SchemaConfig` automatically when loading from files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaConfig {
+    /// Schema subject name in the registry
+    pub subject: String,
+
+    /// Schema type (JsonSchema, Avro, Protobuf, etc.)
+    pub schema_type: String,
+
+    /// Path to schema definition file
+    pub schema_file: PathBuf,
+
+    /// Auto-register schema on startup if it doesn't exist
+    #[serde(default = "default_schema_auto_register")]
+    pub auto_register: bool,
+
+    /// Version strategy for producers
+    #[serde(default)]
+    pub version_strategy: VersionStrategy,
+}
+
+fn default_schema_auto_register() -> bool {
+    true
+}
+
+/// Strategy for selecting schema version
+///
+/// Used in `SchemaMapping` and `SchemaConfig` to control which schema version producers use.
+///
+/// Can be used via:
+/// - TOML config file: `version_strategy` field in `[[schemas]]`
+/// - Direct construction in code for programmatic control
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VersionStrategy {
+    /// Use the latest schema version (default)
+    #[default]
+    Latest,
+
+    /// Pin to a specific schema version
+    Pinned(u32),
+
+    /// Use minimum version or newer
+    Minimum(u32),
 }
 
 #[cfg(test)]

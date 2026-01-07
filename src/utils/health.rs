@@ -3,6 +3,8 @@
 use std::time::{Duration, Instant};
 
 /// Health check status
+///
+/// Utility for implementing health checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HealthStatus {
     /// Connector is healthy
@@ -14,6 +16,10 @@ pub enum HealthStatus {
 }
 
 /// Health checker with failure tracking
+///
+/// Utility for tracking connector health.
+///
+/// Useful for implementing health monitoring in connectors.
 #[derive(Debug)]
 pub struct HealthChecker {
     status: HealthStatus,

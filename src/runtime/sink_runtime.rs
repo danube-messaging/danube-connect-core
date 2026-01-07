@@ -3,9 +3,9 @@
 //! Handles message consumption from Danube topics and processing through sink connectors.
 //! Supports multiple consumers for consuming from multiple Danube topics.
 
+use crate::retry::{RetryConfig, RetryStrategy};
 use crate::{
-    ConnectorConfig, ConnectorError, ConnectorMetrics, ConnectorResult, RetryConfig, RetryStrategy,
-    SinkConnector, SinkRecord, SubscriptionType,
+    ConnectorConfig, ConnectorError, ConnectorMetrics, ConnectorResult, SinkConnector, SinkRecord,
 };
 use danube_client::DanubeClient;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,36 +14,19 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tracing::{debug, error, info, warn};
 
-/// Configuration for a Danube consumer
-///
-/// Specifies how to create a consumer for a specific topic, including subscription settings.
-#[derive(Debug, Clone)]
-pub struct ConsumerConfig {
-    /// Danube topic to consume from (format: /{namespace}/{topic_name})
-    pub topic: String,
-    /// Consumer name (for identification)
-    pub consumer_name: String,
-    /// Subscription name (shared across consumer instances)
-    pub subscription: String,
-    /// Subscription type (Exclusive, Shared, FailOver)
-    pub subscription_type: SubscriptionType,
-    /// Optional: Expected schema subject for validation
-    /// If set, runtime will validate that incoming messages match this schema
-    pub expected_schema_subject: Option<String>,
-}
-
 /// Internal struct to hold consumer and its stream together
-struct ConsumerStream {
-    topic: String,
-    consumer: danube_client::Consumer,
-    stream: mpsc::Receiver<danube_core::message::StreamMessage>,
+pub(crate) struct ConsumerStream {
+    pub(crate) topic: String,
+    pub(crate) consumer: danube_client::Consumer,
+    pub(crate) stream: mpsc::Receiver<danube_core::message::StreamMessage>,
     /// Optional expected schema subject for validation
-    expected_schema_subject: Option<String>,
+    pub(crate) expected_schema_subject: Option<String>,
 }
 
 /// Runtime for Sink Connectors (Danube → External System)
 ///
 /// Manages multiple consumers dynamically, one per source topic.
+/// Create with `SinkRuntime::new()` and run with `.run().await`.
 pub struct SinkRuntime<C: SinkConnector> {
     connector: C,
     client: DanubeClient,
@@ -216,105 +199,6 @@ impl<C: SinkConnector> SinkRuntime<C> {
         Ok(streams)
     }
 
-    /// Deserialize message payload based on schema
-    ///
-    /// Fetches schema from registry (with caching) and deserializes the payload
-    /// into a serde_json::Value based on the schema type.
-    async fn deserialize_message(
-        &self,
-        message: &danube_core::message::StreamMessage,
-        expected_schema_subject: &Option<String>,
-    ) -> ConnectorResult<(serde_json::Value, Option<crate::SchemaInfo>)> {
-        use serde_json::json;
-        
-        if let Some(schema_id) = message.schema_id {
-            // Message has schema - fetch and deserialize accordingly
-            let schema = self.context.get_schema(schema_id).await?;
-            
-            // Validate expected schema if configured
-            if let Some(expected) = expected_schema_subject {
-                if &schema.subject != expected {
-                    return Err(ConnectorError::invalid_data(
-                        format!(
-                            "Schema mismatch: expected '{}', got '{}' (schema_id: {})",
-                            expected, schema.subject, schema_id
-                        ),
-                        Vec::new(),
-                    ));
-                }
-            }
-            
-            let payload = match schema.schema_type.to_lowercase().as_str() {
-                "json_schema" | "json" => {
-                    serde_json::from_slice(&message.payload).map_err(|e| {
-                        ConnectorError::invalid_data(
-                            format!("JSON deserialization failed: {}", e),
-                            message.payload.clone(),
-                        )
-                    })?
-                },
-                "string" => {
-                    let s = std::str::from_utf8(&message.payload).map_err(|e| {
-                        ConnectorError::invalid_data(
-                            format!("UTF-8 decode failed: {}", e),
-                            message.payload.clone(),
-                        )
-                    })?;
-                    json!(s)
-                },
-                "number" => {
-                    serde_json::from_slice(&message.payload).map_err(|e| {
-                        ConnectorError::invalid_data(
-                            format!("Number deserialization failed: {}", e),
-                            message.payload.clone(),
-                        )
-                    })?
-                },
-                "bytes" => {
-                    // Bytes - encode as base64 in JSON
-                    json!({
-                        "data": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &message.payload),
-                        "size": message.payload.len()
-                    })
-                },
-                "avro" => {
-                    // TODO: Implement Avro deserialization
-                    return Err(ConnectorError::config(
-                        "Avro deserialization not yet implemented"
-                    ));
-                },
-                "protobuf" => {
-                    // TODO: Implement Protobuf deserialization
-                    return Err(ConnectorError::config(
-                        "Protobuf deserialization not yet implemented"
-                    ));
-                },
-                _ => {
-                    // Unknown type - try JSON
-                    warn!("Unknown schema type '{}', attempting JSON deserialization", schema.schema_type);
-                    serde_json::from_slice(&message.payload).unwrap_or_else(|_| {
-                        json!({
-                            "raw": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &message.payload),
-                            "size": message.payload.len()
-                        })
-                    })
-                }
-            };
-            
-            Ok((payload, Some(schema)))
-        } else {
-            // No schema - try JSON, fallback to base64
-            let payload = serde_json::from_slice(&message.payload).unwrap_or_else(|_| {
-                debug!("Message has no schema and is not JSON, encoding as base64");
-                json!({
-                    "raw": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &message.payload),
-                    "size": message.payload.len()
-                })
-            });
-            
-            Ok((payload, None))
-        }
-    }
 
     /// Main message processing loop
     async fn process_messages(&mut self, streams: &mut [ConsumerStream]) -> ConnectorResult<()> {
@@ -339,38 +223,21 @@ impl<C: SinkConnector> SinkRuntime<C> {
                         has_activity = true;
                         self.metrics.record_received();
 
-                        // Deserialize message with schema-aware logic
-                        let (typed_payload, schema_info) = match self
-                            .deserialize_message(&msg, &consumer_stream.expected_schema_subject)
-                            .await
+                        // Convert StreamMessage to SinkRecord with schema-aware deserialization
+                        let record = match SinkRecord::from_stream_message(
+                            &msg,
+                            &consumer_stream.expected_schema_subject,
+                            &self.context,
+                        )
+                        .await
                         {
-                            Ok(data) => data,
+                            Ok(record) => record,
                             Err(e) => {
-                                error!("Failed to deserialize message: {}", e);
+                                error!("Failed to create SinkRecord from message: {}", e);
                                 self.metrics.record_error(&format!("{:?}", e));
                                 // Skip this message and continue
                                 continue;
                             }
-                        };
-
-                        // Create SinkRecord with typed payload and schema info
-                        let message_id = format!(
-                            "topic:{}/producer:{}/offset:{}",
-                            msg.msg_id.topic_name, msg.msg_id.producer_id, msg.msg_id.topic_offset
-                        );
-                        
-                        let record = SinkRecord {
-                            payload: typed_payload,
-                            attributes: msg.attributes.clone(),
-                            danube_metadata: crate::message::DanubeMetadata {
-                                topic: msg.msg_id.topic_name.clone(),
-                                offset: msg.msg_id.topic_offset,
-                                publish_time: msg.publish_time,
-                                message_id,
-                                producer_name: msg.producer_name.clone(),
-                            },
-                            partition: None, // TODO: Extract from message when partitioning is supported
-                            schema_info,
                         };
 
                         debug!(
@@ -415,7 +282,7 @@ impl<C: SinkConnector> SinkRuntime<C> {
                 if let Err(e) = self.connector.process_batch(vec![]).await {
                     error!("Error during periodic flush check: {}", e);
                 }
-                
+
                 // Sleep 100ms between check cycles to maintain reasonable flush check frequency
                 // This ensures flush checks happen approximately every 100ms regardless of stream count
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;

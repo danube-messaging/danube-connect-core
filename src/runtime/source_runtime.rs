@@ -4,8 +4,8 @@
 //! dynamic multi-producer management.
 
 use crate::{
-    ConnectorConfig, ConnectorError, ConnectorMetrics, ConnectorResult, SourceConnector,
-    SourceRecord,
+    ConnectorConfig, ConnectorError, ConnectorMetrics, ConnectorResult, SchemaConfig,
+    SourceConnector, SourceRecord, VersionStrategy,
 };
 use danube_client::{DanubeClient, Producer};
 use std::collections::HashMap;
@@ -15,26 +15,11 @@ use std::time::Duration;
 use tokio::time::Instant;
 use tracing::{debug, error, info, warn};
 
-/// Configuration for a Danube producer
-///
-/// Specifies how to create a producer for a specific topic, including partitioning
-/// and reliability settings.
-#[derive(Debug, Clone)]
-pub struct ProducerConfig {
-    /// Danube topic name (format: /{namespace}/{topic_name})
-    pub topic: String,
-    /// Number of partitions (0 = non-partitioned)
-    pub partitions: usize,
-    /// Use reliable dispatch (WAL + Cloud persistence)
-    pub reliable_dispatch: bool,
-    /// Optional schema configuration (will be populated by runtime from config file)
-    pub schema_config: Option<crate::runtime::SchemaConfig>,
-}
-
 /// Runtime for Source Connectors (External System → Danube)
 ///
 /// Manages multiple producers for publishing to Danube topics. All producers are
 /// created upfront based on connector configuration.
+/// Create with `SourceRuntime::new()` and run with `.run().await`.
 pub struct SourceRuntime<C: SourceConnector> {
     connector: C,
     client: DanubeClient,
@@ -43,7 +28,7 @@ pub struct SourceRuntime<C: SourceConnector> {
     metrics: Arc<ConnectorMetrics>,
     shutdown: Arc<AtomicBool>,
     /// Schema configurations by topic (for schema registry support)
-    schema_configs: HashMap<String, crate::runtime::SchemaConfig>,
+    schema_configs: HashMap<String, SchemaConfig>,
     /// Shared context with schema client and caching
     context: Arc<crate::runtime::ConnectorContext>,
 }
@@ -141,124 +126,10 @@ impl<C: SourceConnector> SourceRuntime<C> {
 
     /// Initialize schema registry support
     ///
-    /// Loads schema files from config and registers them with the schema registry.
-    /// This happens before connector initialization to ensure schemas are available.
+    /// Uses SchemaRegistry to load and register schemas.
     async fn initialize_schemas(&mut self) -> ConnectorResult<()> {
-        if self.config.schemas.is_empty() {
-            info!("No schemas configured - messages will be sent without schema validation");
-            return Ok(());
-        }
-
-        info!("Initializing {} schema(s)", self.config.schemas.len());
-
-        let mut schema_client = self.context.schema_client().await?;
-
-        for schema_mapping in &self.config.schemas {
-            // Convert schema_type string to proper format
-            let schema_type_str = schema_mapping.schema_type.to_lowercase();
-            
-            // Check if schema file is needed based on type
-            // Primitive types (String, Number, Bytes) don't need schema files
-            let needs_schema_file = matches!(
-                schema_type_str.as_str(),
-                "json_schema" | "json" | "avro" | "protobuf"
-            );
-            
-            // Load schema file only if needed
-            let schema_data = if needs_schema_file {
-                std::fs::read(&schema_mapping.schema_file).map_err(|e| {
-                    ConnectorError::config(format!(
-                        "Failed to read schema file '{:?}': {}",
-                        schema_mapping.schema_file, e
-                    ))
-                })?
-            } else {
-                // For primitive types, use empty schema data
-                Vec::new()
-            };
-
-            // Register or verify schema
-            if schema_mapping.auto_register {
-                match schema_client
-                    .get_latest_schema(&schema_mapping.subject)
-                    .await
-                {
-                    Ok(existing) => {
-                        info!(
-                            "Schema '{}' already exists (ID: {}, version: {})",
-                            schema_mapping.subject, existing.schema_id, existing.version
-                        );
-                        // TODO: Could validate that existing schema matches our file
-                    }
-                    Err(_) => {
-                        info!("Registering new schema '{}'...", schema_mapping.subject);
-                        // Parse schema type string to SchemaType enum
-                        let schema_type = match schema_type_str.as_str() {
-                            "json_schema" | "json" => danube_client::SchemaType::JsonSchema,
-                            "string" => danube_client::SchemaType::String,
-                            "number" => danube_client::SchemaType::Number,
-                            "bytes" => danube_client::SchemaType::Bytes,
-                            "avro" => danube_client::SchemaType::Avro,
-                            "protobuf" => danube_client::SchemaType::Protobuf,
-                            _ => {
-                                return Err(ConnectorError::config(format!(
-                                    "Unsupported schema type: {}",
-                                    schema_type_str
-                                )));
-                            }
-                        };
-
-                        let _schema_id = schema_client
-                            .register_schema(&schema_mapping.subject)
-                            .with_type(schema_type)
-                            .with_schema_data(schema_data.clone())
-                            .execute()
-                            .await
-                            .map_err(|e| {
-                                ConnectorError::fatal(format!(
-                                    "Failed to register schema '{}': {}",
-                                    schema_mapping.subject, e
-                                ))
-                            })?;
-                        info!(
-                            "✅ Schema '{}' registered successfully",
-                            schema_mapping.subject
-                        );
-                    }
-                }
-            } else {
-                // Not auto-registering - schema must exist
-                let _existing = schema_client
-                    .get_latest_schema(&schema_mapping.subject)
-                    .await
-                    .map_err(|e| {
-                        ConnectorError::config(format!(
-                            "Schema '{}' not found and auto_register=false: {}",
-                            schema_mapping.subject, e
-                        ))
-                    })?;
-                info!("Schema '{}' found in registry", schema_mapping.subject);
-            }
-
-            // Store schema config for this topic
-            self.schema_configs.insert(
-                schema_mapping.topic.clone(),
-                crate::runtime::SchemaConfig {
-                    subject: schema_mapping.subject.clone(),
-                    schema_type: schema_mapping.schema_type.clone(),
-                    schema_file: schema_mapping.schema_file.clone(),
-                    auto_register: schema_mapping.auto_register,
-                    version_strategy: schema_mapping.version_strategy.clone(),
-                },
-            );
-
-            info!(
-                "✅ Topic '{}' configured with schema '{}' (type: {})",
-                schema_mapping.topic, schema_mapping.subject, schema_mapping.schema_type
-            );
-        }
-
-        info!("Schema initialization complete");
+        let schema_registry = crate::schema::SchemaRegistry::new(self.context.clone());
+        self.schema_configs = schema_registry.initialize(&self.config.schemas).await?;
         Ok(())
     }
 
@@ -392,15 +263,15 @@ impl<C: SourceConnector> SourceRuntime<C> {
 
                 // Configure based on version strategy
                 match &schema_cfg.version_strategy {
-                    crate::runtime::VersionStrategy::Latest => {
+                    VersionStrategy::Latest => {
                         producer_builder =
                             producer_builder.with_schema_subject(&schema_cfg.subject);
                     }
-                    crate::runtime::VersionStrategy::Pinned(version) => {
+                    VersionStrategy::Pinned(version) => {
                         producer_builder =
                             producer_builder.with_schema_version(&schema_cfg.subject, *version);
                     }
-                    crate::runtime::VersionStrategy::Minimum(min_version) => {
+                    VersionStrategy::Minimum(min_version) => {
                         producer_builder = producer_builder
                             .with_schema_min_version(&schema_cfg.subject, *min_version);
                     }

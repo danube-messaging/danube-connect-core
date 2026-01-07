@@ -65,19 +65,20 @@ mod traits;
 pub mod utils;
 
 // Re-export public API
-pub use config::{ConnectorConfig, ProcessingSettings, RetrySettings, SchemaMapping, SubscriptionType};
+pub use config::{
+    ConnectorConfig, ConsumerConfig, ProcessingSettings, ProducerConfig, RetrySettings,
+    SchemaConfig, SchemaMapping, SubscriptionType, VersionStrategy,
+};
 pub use error::{ConnectorError, ConnectorResult};
-pub use message::{DanubeMetadata, SchemaInfo, SinkRecord, SourceRecord};
+pub use message::{DanubeMetadata, SinkRecord, SourceRecord};
 pub use metrics::ConnectorMetrics;
-pub use retry::{RetryConfig, RetryStrategy};
-pub use runtime::{CacheStats, ConnectorContext, ConsumerConfig, ProducerConfig, SchemaConfig, SinkRuntime, SourceRuntime, VersionStrategy};
+pub use runtime::{SinkRuntime, SourceRuntime};
 pub use schema::SchemaType;
 pub use traits::{Offset, SinkConnector, SourceConnector};
 pub use utils::{Batcher, HealthChecker, HealthStatus};
 
 // Re-export commonly used types from danube-client
-pub use danube_client::SubType;
-pub use danube_core::message::{MessageID, StreamMessage};
+pub use danube_client::{SchemaInfo, SubType};
 
 // Version info
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

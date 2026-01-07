@@ -4,6 +4,9 @@ use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gau
 use std::time::Duration;
 
 /// Metrics collector for connectors
+///
+/// Provides Prometheus metrics for monitoring connector health and performance.
+/// Users can create their own instances for custom metrics or use the runtime-provided instance.
 #[derive(Debug, Clone)]
 pub struct ConnectorMetrics {
     /// Connector name for labeling

@@ -3,9 +3,13 @@
 use thiserror::Error;
 
 /// Result type for connector operations
+///
+/// **Mandatory public API** - all connector methods return this.
 pub type ConnectorResult<T> = Result<T, ConnectorError>;
 
 /// Error types for connector operations
+///
+/// **Mandatory public API** - all connectors use this for error handling.
 #[derive(Error, Debug)]
 pub enum ConnectorError {
     /// Retryable errors - transient failures that should be retried

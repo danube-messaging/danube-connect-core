@@ -1,10 +1,8 @@
 //! Connector trait definitions.
-//!
-//! This module defines the core traits that connectors must implement:
-//! - `SinkConnector`: For consuming from Danube and writing to external systems
-//! - `SourceConnector`: For reading from external systems and producing to Danube
 
-use crate::{ConnectorConfig, ConnectorResult, SinkRecord, SourceRecord};
+use crate::{
+    ConnectorConfig, ConnectorResult, ConsumerConfig, ProducerConfig, SinkRecord, SourceRecord,
+};
 use async_trait::async_trait;
 
 /// Trait for implementing Sink Connectors (Danube → External System)
@@ -78,7 +76,7 @@ pub trait SinkConnector: Send + Sync {
     /// # Note
     ///
     /// This method is called after `initialize()` and before message processing begins.
-    async fn consumer_configs(&self) -> ConnectorResult<Vec<crate::ConsumerConfig>>;
+    async fn consumer_configs(&self) -> ConnectorResult<Vec<ConsumerConfig>>;
 
     /// Process a single message from Danube
     ///
@@ -96,7 +94,7 @@ pub trait SinkConnector: Send + Sync {
     /// Return appropriate error type based on the failure scenario
     async fn process(&mut self, record: SinkRecord) -> ConnectorResult<()>;
 
-    /// Optional: Process a batch of messages for better throughput
+    /// Process a batch of messages for better throughput
     ///
     /// Override this method to implement batch processing for better performance.
     /// The default implementation calls `process()` for each record sequentially.
@@ -182,12 +180,7 @@ pub trait SinkConnector: Send + Sync {
 ///     async fn producer_configs(&self) -> ConnectorResult<Vec<ProducerConfig>> {
 ///         // Define destination topics and their configurations
 ///         Ok(vec![
-///             ProducerConfig {
-///                 topic: "/default/file_data".to_string(),
-///                 partitions: 0,
-///                 reliable_dispatch: false,
-///                 schema_config: None,
-///             }
+///             ProducerConfig::new("/default/file_data", 0, false)
 ///         ])
 ///     }
 ///     
@@ -226,7 +219,7 @@ pub trait SourceConnector: Send + Sync {
     /// # Returns
     ///
     /// Vector of `ProducerConfig` objects, one for each destination topic.
-    async fn producer_configs(&self) -> ConnectorResult<Vec<crate::runtime::ProducerConfig>>;
+    async fn producer_configs(&self) -> ConnectorResult<Vec<ProducerConfig>>;
 
     /// Poll for new data from the external system
     ///
@@ -269,6 +262,8 @@ pub trait SourceConnector: Send + Sync {
 }
 
 /// Checkpoint/offset information for source connectors
+///
+/// **Mandatory public API** - used by source connectors for checkpointing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Offset {
     /// The partition or source identifier

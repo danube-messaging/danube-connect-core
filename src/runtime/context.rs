@@ -10,11 +10,13 @@ use tokio::sync::RwLock;
 
 /// Shared context for connector runtime with schema registry support
 ///
+/// Internal runtime state - not exposed to connector developers.
+///
 /// Provides:
 /// - Lazy-initialized schema registry client
 /// - Thread-safe schema caching
 /// - Automatic cache management
-pub struct ConnectorContext {
+pub(crate) struct ConnectorContext {
     /// Danube client
     client: Arc<DanubeClient>,
     
@@ -28,7 +30,7 @@ pub struct ConnectorContext {
 
 impl ConnectorContext {
     /// Create a new connector context
-    pub fn new(client: DanubeClient) -> Self {
+    pub(crate) fn new(client: DanubeClient) -> Self {
         Self {
             client: Arc::new(client),
             schema_client: Arc::new(RwLock::new(None)),
@@ -40,7 +42,7 @@ impl ConnectorContext {
     ///
     /// The schema client is only created when first needed, avoiding
     /// overhead for connectors that don't use schema registry.
-    pub async fn schema_client(&self) -> ConnectorResult<SchemaRegistryClient> {
+    pub(crate) async fn schema_client(&self) -> ConnectorResult<SchemaRegistryClient> {
         // Fast path: check if already initialized (read lock)
         {
             let lock = self.schema_client.read().await;
@@ -79,7 +81,7 @@ impl ConnectorContext {
     /// # Performance
     /// - Cache hit: ~0.1ms (just RwLock read)
     /// - Cache miss: ~5-10ms (registry lookup + cache update)
-    pub async fn get_schema(&self, schema_id: u64) -> ConnectorResult<SchemaInfo> {
+    pub(crate) async fn get_schema(&self, schema_id: u64) -> ConnectorResult<SchemaInfo> {
         // Fast path: check cache (read lock)
         {
             let cache = self.schema_cache.read().await;
@@ -117,12 +119,12 @@ impl ConnectorContext {
     }
     
     /// Get the Danube client
-    pub fn client(&self) -> &Arc<DanubeClient> {
+    pub(crate) fn client(&self) -> &Arc<DanubeClient> {
         &self.client
     }
     
     /// Get cache statistics (for monitoring)
-    pub async fn cache_stats(&self) -> CacheStats {
+    pub(crate) async fn cache_stats(&self) -> CacheStats {
         let cache = self.schema_cache.read().await;
         CacheStats {
             size: cache.len(),
@@ -131,7 +133,7 @@ impl ConnectorContext {
     }
     
     /// Clear the schema cache (rarely needed, mainly for testing)
-    pub async fn clear_cache(&self) {
+    pub(crate) async fn clear_cache(&self) {
         let mut cache = self.schema_cache.write().await;
         cache.clear();
         tracing::info!("Schema cache cleared");
@@ -139,8 +141,10 @@ impl ConnectorContext {
 }
 
 /// Cache statistics for monitoring
+///
+/// Internal type - used by runtime for monitoring schema cache.
 #[derive(Debug, Clone)]
-pub struct CacheStats {
+pub(crate) struct CacheStats {
     /// Number of cached schemas
     pub size: usize,
     /// Cache capacity

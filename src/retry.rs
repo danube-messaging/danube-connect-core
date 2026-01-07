@@ -3,23 +3,25 @@
 use std::time::Duration;
 
 /// Configuration for retry behavior
+///
+/// Internal type - users configure retries via `RetrySettings` in `ConnectorConfig`.
 #[derive(Debug, Clone)]
-pub struct RetryConfig {
+pub(crate) struct RetryConfig {
     /// Maximum number of retry attempts
-    pub max_retries: u32,
+    max_retries: u32,
     /// Base backoff duration in milliseconds
-    pub base_backoff_ms: u64,
+    base_backoff_ms: u64,
     /// Maximum backoff duration in milliseconds
-    pub max_backoff_ms: u64,
+    max_backoff_ms: u64,
     /// Backoff multiplier for exponential backoff
-    pub multiplier: f64,
+    multiplier: f64,
     /// Add jitter to backoff to avoid thundering herd
-    pub jitter: bool,
+    jitter: bool,
 }
 
 impl RetryConfig {
     /// Create a new retry configuration
-    pub fn new(max_retries: u32, base_backoff_ms: u64, max_backoff_ms: u64) -> Self {
+    pub(crate) fn new(max_retries: u32, base_backoff_ms: u64, max_backoff_ms: u64) -> Self {
         Self {
             max_retries,
             base_backoff_ms,
@@ -30,7 +32,7 @@ impl RetryConfig {
     }
 
     /// Create exponential backoff configuration
-    pub fn exponential(max_retries: u32) -> Self {
+    pub(crate) fn exponential(max_retries: u32) -> Self {
         Self {
             max_retries,
             base_backoff_ms: 1000,
@@ -41,7 +43,7 @@ impl RetryConfig {
     }
 
     /// Create linear backoff configuration
-    pub fn linear(max_retries: u32, backoff_ms: u64) -> Self {
+    pub(crate) fn linear(max_retries: u32, backoff_ms: u64) -> Self {
         Self {
             max_retries,
             base_backoff_ms: backoff_ms,
@@ -52,7 +54,7 @@ impl RetryConfig {
     }
 
     /// Create fixed delay configuration
-    pub fn fixed(max_retries: u32, delay_ms: u64) -> Self {
+    pub(crate) fn fixed(max_retries: u32, delay_ms: u64) -> Self {
         Self {
             max_retries,
             base_backoff_ms: delay_ms,
@@ -82,29 +84,31 @@ impl Default for RetryConfig {
 }
 
 /// Retry strategy implementation
+///
+/// Internal type - users configure retries via `RetrySettings` in `ConnectorConfig`.
 #[derive(Debug, Clone)]
-pub struct RetryStrategy {
+pub(crate) struct RetryStrategy {
     config: RetryConfig,
 }
 
 impl RetryStrategy {
     /// Create a new retry strategy
-    pub fn new(config: RetryConfig) -> Self {
+    pub(crate) fn new(config: RetryConfig) -> Self {
         Self { config }
     }
 
     /// Create an exponential backoff strategy
-    pub fn exponential_backoff(max_retries: u32) -> Self {
+    pub(crate) fn exponential_backoff(max_retries: u32) -> Self {
         Self::new(RetryConfig::exponential(max_retries))
     }
 
     /// Create a linear backoff strategy
-    pub fn linear_backoff(max_retries: u32, backoff_ms: u64) -> Self {
+    pub(crate) fn linear_backoff(max_retries: u32, backoff_ms: u64) -> Self {
         Self::new(RetryConfig::linear(max_retries, backoff_ms))
     }
 
     /// Create a fixed delay strategy
-    pub fn fixed_delay(max_retries: u32, delay_ms: u64) -> Self {
+    pub(crate) fn fixed_delay(max_retries: u32, delay_ms: u64) -> Self {
         Self::new(RetryConfig::fixed(max_retries, delay_ms))
     }
 
@@ -113,7 +117,7 @@ impl RetryStrategy {
     /// # Arguments
     ///
     /// * `attempt` - The current attempt number (1-indexed)
-    pub fn calculate_backoff(&self, attempt: u32) -> Duration {
+    pub(crate) fn calculate_backoff(&self, attempt: u32) -> Duration {
         if attempt == 0 {
             return Duration::from_millis(0);
         }
@@ -137,12 +141,12 @@ impl RetryStrategy {
     }
 
     /// Get the maximum number of retries
-    pub fn max_retries(&self) -> u32 {
+    pub(crate) fn max_retries(&self) -> u32 {
         self.config.max_retries
     }
 
     /// Check if should retry based on attempt count
-    pub fn should_retry(&self, attempt: u32) -> bool {
+    pub(crate) fn should_retry(&self, attempt: u32) -> bool {
         attempt < self.config.max_retries
     }
 }

@@ -3,6 +3,10 @@
 use std::time::{Duration, Instant};
 
 /// A generic batcher that collects items until reaching a size or timeout threshold
+///
+/// Utility for batching operations.
+///
+/// Useful for implementing batch processing in connectors.
 #[derive(Debug)]
 pub struct Batcher<T> {
     items: Vec<T>,
