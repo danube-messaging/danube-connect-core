@@ -224,8 +224,10 @@ impl<C: SinkConnector> SinkRuntime<C> {
                         self.metrics.record_received();
 
                         // Convert StreamMessage to SinkRecord with schema-aware deserialization
+                        // Use the logical topic from subscription, not from message's partition topic
                         let record = match SinkRecord::from_stream_message(
                             &msg,
+                            &consumer_stream.topic,  // Logical topic from subscription
                             &consumer_stream.expected_schema_subject,
                             &self.context,
                         )
@@ -241,9 +243,8 @@ impl<C: SinkConnector> SinkRuntime<C> {
                         };
 
                         debug!(
-                            "Processing message from topic {}: offset={}, has_schema={}",
+                            "Processing message from topic {}: has_schema={}",
                             consumer_stream.topic,
-                            record.offset(),
                             record.schema().is_some()
                         );
 

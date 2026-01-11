@@ -51,7 +51,6 @@ impl SinkConnector for SchemaSinkConnector {
 
         println!("=== Message #{} ===", self.message_count);
         println!("Topic: {}", record.topic());
-        println!("Offset: {}", record.offset());
         println!("Producer: {}", record.producer_name());
         println!("Publish Time: {}", record.publish_time());
 

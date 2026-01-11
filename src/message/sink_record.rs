@@ -34,17 +34,13 @@ pub struct SinkRecord {
 ///
 /// **Mandatory public API** - accessed through `SinkRecord` methods.
 ///
-/// Provides message metadata like topic, offset, timestamps for observability.
+/// Provides message metadata like topic, timestamps for observability.
 #[derive(Debug, Clone)]
 pub struct DanubeMetadata {
-    /// Topic name
+    /// Topic name (logical topic from subscription)
     pub(crate) topic: String,
-    /// Message offset within topic
-    pub(crate) offset: u64,
     /// Publish timestamp (microseconds since epoch)
     pub(crate) publish_time: u64,
-    /// Formatted message ID for logging/debugging
-    pub(crate) message_id: String,
     /// Producer name (for debugging)
     pub(crate) producer_name: String,
 }
@@ -54,8 +50,15 @@ impl SinkRecord {
     ///
     /// Fetches schema from registry (with caching) and deserializes the payload
     /// into a serde_json::Value based on the schema type.
+    ///
+    /// # Arguments
+    /// * `message` - The stream message from Danube broker
+    /// * `logical_topic` - The logical topic name (from consumer subscription, not from message)
+    /// * `expected_schema_subject` - Optional schema subject for validation
+    /// * `context` - Connector context with schema registry client
     pub(crate) async fn from_stream_message(
         message: &StreamMessage,
+        logical_topic: &str,
         expected_schema_subject: &Option<String>,
         context: &ConnectorContext,
     ) -> ConnectorResult<Self> {
@@ -63,20 +66,12 @@ impl SinkRecord {
         let (payload, schema_info) =
             Self::deserialize_payload(message, expected_schema_subject, context).await?;
 
-        // Build message ID for debugging
-        let message_id = format!(
-            "topic:{}/producer:{}/offset:{}",
-            message.msg_id.topic_name, message.msg_id.producer_id, message.msg_id.topic_offset
-        );
-
         Ok(SinkRecord {
             payload,
             attributes: message.attributes.clone(),
             danube_metadata: DanubeMetadata {
-                topic: message.msg_id.topic_name.clone(),
-                offset: message.msg_id.topic_offset,
+                topic: logical_topic.to_string(),  // Use logical topic from subscription
                 publish_time: message.publish_time,
-                message_id,
                 producer_name: message.producer_name.clone(),
             },
             partition: None, // TODO: Extract from message when partitioning is supported
@@ -186,11 +181,6 @@ impl SinkRecord {
     /// Create a simple SinkRecord for testing (without schema registry)
     #[cfg(test)]
     pub(crate) fn new_for_test(message: StreamMessage) -> Self {
-        let message_id = format!(
-            "topic:{}/producer:{}/offset:{}",
-            message.msg_id.topic_name, message.msg_id.producer_id, message.msg_id.topic_offset
-        );
-
         let payload = serde_json::from_slice(&message.payload)
             .unwrap_or_else(|_| json!({ "raw": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &message.payload) }));
 
@@ -199,9 +189,7 @@ impl SinkRecord {
             attributes: message.attributes,
             danube_metadata: DanubeMetadata {
                 topic: message.msg_id.topic_name.clone(),
-                offset: message.msg_id.topic_offset,
                 publish_time: message.publish_time,
-                message_id,
                 producer_name: message.producer_name,
             },
             partition: None,
@@ -257,14 +245,9 @@ impl SinkRecord {
         self.attributes.contains_key(key)
     }
 
-    /// Get the topic name
+    /// Get the topic name (logical topic from subscription)
     pub fn topic(&self) -> &str {
         &self.danube_metadata.topic
-    }
-
-    /// Get the topic offset
-    pub fn offset(&self) -> u64 {
-        self.danube_metadata.offset
     }
 
     /// Get the publish timestamp (microseconds since epoch)
@@ -275,11 +258,6 @@ impl SinkRecord {
     /// Get the producer name
     pub fn producer_name(&self) -> &str {
         &self.danube_metadata.producer_name
-    }
-
-    /// Get a formatted message ID string for logging
-    pub fn message_id(&self) -> &str {
-        &self.danube_metadata.message_id
     }
 }
 
@@ -315,8 +293,7 @@ mod tests {
 
         // Payload is now typed data (Value)
         assert_eq!(record.payload().as_str().unwrap(), "test payload");
-        assert_eq!(record.topic(), "/default/test");
-        assert_eq!(record.offset(), 42);
+        assert_eq!(record.topic(), "/default/test");  // Logical topic from subscription
         assert_eq!(record.producer_name(), "test-producer");
     }
 
@@ -377,5 +354,38 @@ mod tests {
         assert_eq!(record.get_attribute("key2"), None);
         assert!(record.has_attribute("key1"));
         assert!(!record.has_attribute("key2"));
+    }
+
+    #[tokio::test]
+    async fn test_sink_record_topic_from_subscription() {
+        // Create a message with partition topic in MessageID
+        let mut message = create_test_message();
+        message.msg_id.topic_name = "/stripe/payments-part-0".to_string();
+
+        // Create a mock context
+        let client = danube_client::DanubeClient::builder()
+            .service_url("http://localhost:6650")
+            .build()
+            .await
+            .unwrap();
+        let context = crate::runtime::ConnectorContext::new(client);
+
+        // When creating SinkRecord, pass the logical topic from subscription
+        let logical_topic = "/stripe/payments";
+        let record = SinkRecord::from_stream_message(
+            &message,
+            logical_topic,
+            &None,
+            &context,
+        )
+        .await
+        .unwrap();
+
+        // Verify that topic() returns the logical topic, not the partition topic from MessageID
+        assert_eq!(record.topic(), "/stripe/payments");
+        
+        // Verify other metadata is preserved
+        assert_eq!(record.producer_name(), "test-producer");
+        assert_eq!(record.publish_time(), 1234567890);
     }
 }
