@@ -13,8 +13,8 @@
 
 use async_trait::async_trait;
 use danube_connect_core::{
-    ConnectorConfig, ConnectorResult, ProcessingSettings, ProducerConfig, RetrySettings,
-    SourceConnector, SourceRecord, SourceRuntime,
+    ConnectorConfig, ConnectorResult, Offset, ProcessingSettings, ProducerConfig, RetrySettings,
+    SourceConnector, SourceEnvelope, SourceRecord, SourceRuntime,
 };
 use std::time::Duration;
 
@@ -52,7 +52,7 @@ impl SourceConnector for SimpleSourceConnector {
         }])
     }
 
-    async fn poll(&mut self) -> ConnectorResult<Vec<SourceRecord>> {
+    async fn poll(&mut self) -> ConnectorResult<Vec<SourceEnvelope>> {
         // Check if we've reached the limit
         if self.counter >= self.max_messages {
             // No more messages to send
@@ -81,7 +81,10 @@ impl SourceConnector for SimpleSourceConnector {
                 .with_attribute("message_number", self.counter.to_string())
                 .with_attribute("batch_index", i.to_string());
 
-            records.push(record);
+            records.push(SourceEnvelope::with_offset(
+                record,
+                Offset::new("generated", self.counter),
+            ));
 
             println!("Generated message #{}", self.counter);
         }

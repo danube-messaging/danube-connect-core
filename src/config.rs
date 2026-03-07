@@ -1,10 +1,13 @@
 //! Configuration management for connectors.
 
+use crate::route::{SinkRoute, SourceRoute};
 use crate::{ConnectorError, ConnectorResult};
 use danube_client::SubType;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::env;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 /// Main configuration for connectors
 ///
@@ -37,7 +40,94 @@ pub struct ConnectorConfig {
     pub schemas: Vec<SchemaMapping>,
 }
 
+pub trait ConfigEnvOverrides {
+    fn apply_env_overrides(&mut self) -> ConnectorResult<()> {
+        Ok(())
+    }
+}
+
+pub trait ConfigValidate {
+    fn validate_config(&self) -> ConnectorResult<()> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ConnectorConfigLoader {
+    config_path_env: String,
+}
+
+impl Default for ConnectorConfigLoader {
+    fn default() -> Self {
+        Self {
+            config_path_env: "CONNECTOR_CONFIG_PATH".to_string(),
+        }
+    }
+}
+
+impl ConnectorConfigLoader {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_path_env(mut self, env_var: impl Into<String>) -> Self {
+        self.config_path_env = env_var.into();
+        self
+    }
+
+    pub fn load<T>(&self) -> ConnectorResult<T>
+    where
+        T: DeserializeOwned + ConfigEnvOverrides + ConfigValidate,
+    {
+        let config_path = env::var(&self.config_path_env).map_err(|_| {
+            ConnectorError::config(format!(
+                "{} environment variable must be set to the path of the TOML configuration file",
+                self.config_path_env
+            ))
+        })?;
+
+        self.from_file(config_path)
+    }
+
+    pub fn from_file<T>(&self, path: impl AsRef<Path>) -> ConnectorResult<T>
+    where
+        T: DeserializeOwned + ConfigEnvOverrides + ConfigValidate,
+    {
+        let path = path.as_ref();
+        let content = fs::read_to_string(path).map_err(|e| {
+            ConnectorError::config(format!(
+                "Failed to read config file {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
+
+        let source_name = path.display().to_string();
+        self.parse_str(&content, &source_name)
+    }
+
+    pub fn parse_str<T>(&self, content: &str, source_name: &str) -> ConnectorResult<T>
+    where
+        T: DeserializeOwned + ConfigEnvOverrides + ConfigValidate,
+    {
+        let mut config: T = toml::from_str(content).map_err(|e| {
+            ConnectorError::config(format!(
+                "Failed to parse config file {}: {}",
+                source_name, e
+            ))
+        })?;
+
+        config.apply_env_overrides()?;
+        config.validate_config()?;
+        Ok(config)
+    }
+}
+
 impl ConnectorConfig {
+    pub fn load() -> ConnectorResult<Self> {
+        ConnectorConfigLoader::new().load()
+    }
+
     /// Load mandatory configuration from environment variables
     ///
     /// Only reads mandatory fields:
@@ -89,7 +179,7 @@ impl ConnectorConfig {
     /// Validate the configuration
     ///
     /// Called internally by the runtime. Users can also call this for early validation.
-    pub(crate) fn validate(&self) -> ConnectorResult<()> {
+    pub fn validate(&self) -> ConnectorResult<()> {
         if self.danube_service_url.is_empty() {
             return Err(ConnectorError::config("danube_service_url cannot be empty"));
         }
@@ -107,6 +197,19 @@ impl ConnectorConfig {
         }
 
         Ok(())
+    }
+}
+
+impl ConfigEnvOverrides for ConnectorConfig {
+    fn apply_env_overrides(&mut self) -> ConnectorResult<()> {
+        ConnectorConfig::apply_env_overrides(self);
+        Ok(())
+    }
+}
+
+impl ConfigValidate for ConnectorConfig {
+    fn validate_config(&self) -> ConnectorResult<()> {
+        self.validate()
     }
 }
 
@@ -145,9 +248,11 @@ pub struct RetrySettings {
 fn default_max_retries() -> u32 {
     3
 }
+
 fn default_retry_backoff_ms() -> u64 {
     1000
 }
+
 fn default_max_backoff_ms() -> u64 {
     30000
 }
@@ -188,22 +293,40 @@ pub struct ProcessingSettings {
     /// Log level
     #[serde(default = "default_log_level")]
     pub log_level: String,
+
+    #[serde(default = "default_health_check_interval_ms")]
+    pub health_check_interval_ms: u64,
+
+    #[serde(default = "default_health_check_failure_threshold")]
+    pub health_check_failure_threshold: usize,
 }
 
 fn default_batch_size() -> usize {
     1000
 }
+
 fn default_batch_timeout_ms() -> u64 {
     1000
 }
+
 fn default_poll_interval_ms() -> u64 {
     100
 }
+
 fn default_metrics_port() -> u16 {
     9090
 }
+
 fn default_log_level() -> String {
     "info".to_string()
+}
+
+fn default_health_check_interval_ms() -> u64 {
+    30000
+}
+
+fn default_health_check_failure_threshold() -> usize {
+    3
 }
 
 impl Default for ProcessingSettings {
@@ -214,6 +337,8 @@ impl Default for ProcessingSettings {
             poll_interval_ms: 100,
             metrics_port: 9090,
             log_level: "info".to_string(),
+            health_check_interval_ms: 30000,
+            health_check_failure_threshold: 3,
         }
     }
 }
@@ -294,6 +419,16 @@ pub struct ConsumerConfig {
     pub expected_schema_subject: Option<String>,
 }
 
+impl ConsumerConfig {
+    pub fn route(&self) -> SinkRoute {
+        self.clone().into()
+    }
+
+    pub fn from_route(route: SinkRoute) -> Self {
+        route.into()
+    }
+}
+
 /// Configuration for a Danube producer
 ///
 /// **Mandatory public API** - required by `SourceConnector::producer_configs()` trait.
@@ -325,6 +460,14 @@ impl ProducerConfig {
             reliable_dispatch,
             schema_config: None,
         }
+    }
+
+    pub fn route(&self) -> SourceRoute {
+        self.clone().into()
+    }
+
+    pub fn from_route(route: SourceRoute) -> Self {
+        route.into()
     }
 }
 
@@ -385,6 +528,8 @@ pub enum VersionStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_config_default() {
@@ -393,6 +538,8 @@ mod tests {
         assert_eq!(config.connector_name, "default-connector");
         assert_eq!(config.retry.max_retries, 3);
         assert_eq!(config.processing.batch_size, 1000);
+        assert_eq!(config.processing.health_check_interval_ms, 30000);
+        assert_eq!(config.processing.health_check_failure_threshold, 3);
     }
 
     #[test]
@@ -406,5 +553,32 @@ mod tests {
         config.danube_service_url = "http://localhost:6650".to_string();
         config.processing.batch_size = 0;
         assert!(config.validate().is_err());
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct LoaderTestConfig {
+        value: String,
+    }
+
+    impl ConfigValidate for LoaderTestConfig {
+        fn validate_config(&self) -> ConnectorResult<()> {
+            if self.value.is_empty() {
+                return Err(ConnectorError::config("value cannot be empty"));
+            }
+
+            Ok(())
+        }
+    }
+
+    impl ConfigEnvOverrides for LoaderTestConfig {}
+
+    #[test]
+    fn test_config_loader_from_file() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "value = \"loaded\"").unwrap();
+
+        let config: LoaderTestConfig = ConnectorConfigLoader::new().from_file(file.path()).unwrap();
+
+        assert_eq!(config.value, "loaded");
     }
 }

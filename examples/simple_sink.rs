@@ -49,54 +49,52 @@ impl SinkConnector for SimpleSinkConnector {
         }])
     }
 
-    async fn process(&mut self, record: SinkRecord) -> ConnectorResult<()> {
-        self.message_count += 1;
+    async fn process_batch(&mut self, records: Vec<SinkRecord>) -> ConnectorResult<()> {
+        for record in records {
+            self.message_count += 1;
 
-        println!("=== Message #{} ===", self.message_count);
-        println!("Topic: {}", record.topic());
-        println!("Producer: {}", record.producer_name());
-        println!("Publish Time: {}", record.publish_time());
+            println!("=== Message #{} ===", self.message_count);
+            println!("Topic: {}", record.topic());
+            println!("Producer: {}", record.producer_name());
+            println!("Publish Time: {}", record.publish_time());
 
-        // NEW: Payload is now typed data (serde_json::Value)
-        let payload = record.payload();
+            let payload = record.payload();
 
-        // Check if message has schema
-        if let Some(schema) = record.schema() {
-            println!(
-                "Schema: {} (version: {}, type: {})",
-                schema.subject, schema.version, schema.schema_type
-            );
-        } else {
-            println!("Schema: None (no schema registry used)");
-        }
-
-        // Print payload based on its type
-        if let Some(text) = payload.as_str() {
-            println!("Payload (string): {}", text);
-        } else if let Some(obj) = payload.as_object() {
-            println!(
-                "Payload (JSON object): {}",
-                serde_json::to_string_pretty(obj).unwrap()
-            );
-        } else if let Some(arr) = payload.as_array() {
-            println!("Payload (JSON array): {} items", arr.len());
-        } else if let Some(num) = payload.as_f64() {
-            println!("Payload (number): {}", num);
-        } else if let Some(b) = payload.as_bool() {
-            println!("Payload (boolean): {}", b);
-        } else {
-            println!("Payload: {}", payload);
-        }
-
-        // Print attributes
-        if !record.attributes().is_empty() {
-            println!("Attributes:");
-            for (key, value) in record.attributes() {
-                println!("  {} = {}", key, value);
+            if let Some(schema) = record.schema() {
+                println!(
+                    "Schema: {} (version: {}, type: {})",
+                    schema.subject, schema.version, schema.schema_type
+                );
+            } else {
+                println!("Schema: None (no schema registry used)");
             }
-        }
 
-        println!();
+            if let Some(text) = payload.as_str() {
+                println!("Payload (string): {}", text);
+            } else if let Some(obj) = payload.as_object() {
+                println!(
+                    "Payload (JSON object): {}",
+                    serde_json::to_string_pretty(obj).unwrap()
+                );
+            } else if let Some(arr) = payload.as_array() {
+                println!("Payload (JSON array): {} items", arr.len());
+            } else if let Some(num) = payload.as_f64() {
+                println!("Payload (number): {}", num);
+            } else if let Some(b) = payload.as_bool() {
+                println!("Payload (boolean): {}", b);
+            } else {
+                println!("Payload: {}", payload);
+            }
+
+            if !record.attributes().is_empty() {
+                println!("Attributes:");
+                for (key, value) in record.attributes() {
+                    println!("  {} = {}", key, value);
+                }
+            }
+
+            println!();
+        }
 
         Ok(())
     }

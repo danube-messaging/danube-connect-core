@@ -38,9 +38,11 @@
 //!         }])
 //!     }
 //!     
-//!     async fn process(&mut self, record: SinkRecord) -> ConnectorResult<()> {
-//!         // Process message
-//!         println!("Got message: {:?}", record.payload());
+//!     async fn process_batch(&mut self, records: Vec<SinkRecord>) -> ConnectorResult<()> {
+//!         // Process message batch
+//!         for record in records {
+//!             println!("Got message: {:?}", record.payload());
+//!         }
 //!         Ok(())
 //!     }
 //! }
@@ -59,6 +61,7 @@ mod error;
 mod message;
 mod metrics;
 mod retry;
+mod route;
 mod runtime;
 mod schema;
 mod traits;
@@ -66,15 +69,21 @@ pub mod utils;
 
 // Re-export public API
 pub use config::{
-    ConnectorConfig, ConsumerConfig, ProcessingSettings, ProducerConfig, RetrySettings,
-    SchemaConfig, SchemaMapping, SubscriptionType, VersionStrategy,
+    ConfigEnvOverrides, ConfigValidate, ConnectorConfig, ConnectorConfigLoader, ConsumerConfig,
+    ProcessingSettings, ProducerConfig, RetrySettings, SchemaConfig, SchemaMapping,
+    SubscriptionType, VersionStrategy,
 };
 pub use error::{ConnectorError, ConnectorResult};
-pub use message::{DanubeMetadata, SinkRecord, SourceRecord};
+pub use message::{DanubeMetadata, RecordContext, RoutingContext, SinkRecord, SourceRecord};
 pub use metrics::ConnectorMetrics;
+pub use route::{
+    RouteDispatchPolicy, RouteSchemaPolicy, RouteSubscriptionPolicy, SinkRoute, SourceRoute,
+};
 pub use runtime::{SinkRuntime, SourceRuntime};
 pub use schema::SchemaType;
-pub use traits::{Offset, SinkConnector, SourceConnector};
+pub use traits::{
+    Offset, SinkConnector, SourceConnector, SourceConnectorMode, SourceEnvelope, SourceSender,
+};
 pub use utils::{Batcher, HealthChecker, HealthStatus};
 
 // Re-export commonly used types from danube-client

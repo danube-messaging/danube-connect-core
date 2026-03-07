@@ -1,7 +1,7 @@
 //! SinkRecord - messages from Danube to external systems
 
 use crate::runtime::ConnectorContext;
-use crate::{ConnectorError, ConnectorResult};
+use crate::{ConnectorError, ConnectorResult, RecordContext, RoutingContext};
 use danube_client::SchemaInfo;
 use danube_core::message::StreamMessage;
 use serde::de::DeserializeOwned;
@@ -70,7 +70,7 @@ impl SinkRecord {
             payload,
             attributes: message.attributes.clone(),
             danube_metadata: DanubeMetadata {
-                topic: logical_topic.to_string(),  // Use logical topic from subscription
+                topic: logical_topic.to_string(), // Use logical topic from subscription
                 publish_time: message.publish_time,
                 producer_name: message.producer_name.clone(),
             },
@@ -230,6 +230,10 @@ impl SinkRecord {
         self.schema_info.as_ref()
     }
 
+    pub fn partition(&self) -> Option<&str> {
+        self.partition.as_deref()
+    }
+
     /// Access message attributes (user-defined properties)
     pub fn attributes(&self) -> &HashMap<String, String> {
         &self.attributes
@@ -240,7 +244,6 @@ impl SinkRecord {
         self.attributes.get(key).map(|s| s.as_str())
     }
 
-    /// Check if an attribute exists
     pub fn has_attribute(&self, key: &str) -> bool {
         self.attributes.contains_key(key)
     }
@@ -258,6 +261,19 @@ impl SinkRecord {
     /// Get the producer name
     pub fn producer_name(&self) -> &str {
         &self.danube_metadata.producer_name
+    }
+
+    pub fn routing_context(&self) -> RoutingContext<'_> {
+        RoutingContext::new(self.topic(), None, self.partition(), &self.attributes)
+    }
+
+    pub fn context(&self) -> RecordContext<'_> {
+        RecordContext::new(
+            self.routing_context(),
+            Some(self.publish_time()),
+            Some(self.producer_name()),
+            self.schema(),
+        )
     }
 }
 
@@ -293,7 +309,7 @@ mod tests {
 
         // Payload is now typed data (Value)
         assert_eq!(record.payload().as_str().unwrap(), "test payload");
-        assert_eq!(record.topic(), "/default/test");  // Logical topic from subscription
+        assert_eq!(record.topic(), "/default/test"); // Logical topic from subscription
         assert_eq!(record.producer_name(), "test-producer");
     }
 
@@ -356,6 +372,30 @@ mod tests {
         assert!(!record.has_attribute("key2"));
     }
 
+    #[test]
+    fn test_sink_record_context_accessors() {
+        let mut message = create_test_message();
+        message
+            .attributes
+            .insert("source".to_string(), "tests".to_string());
+
+        let record = SinkRecord::new_for_test(message);
+        let routing = record.routing_context();
+        assert_eq!(routing.topic(), "/default/test");
+        assert_eq!(routing.key(), None);
+        assert_eq!(routing.partition(), None);
+        assert_eq!(
+            routing.attributes().get("source"),
+            Some(&"tests".to_string())
+        );
+
+        let context = record.context();
+        assert_eq!(context.topic(), "/default/test");
+        assert_eq!(context.publish_time(), Some(1234567890));
+        assert_eq!(context.producer_name(), Some("test-producer"));
+        assert!(context.schema().is_none());
+    }
+
     #[tokio::test]
     async fn test_sink_record_topic_from_subscription() {
         // Create a message with partition topic in MessageID
@@ -372,18 +412,13 @@ mod tests {
 
         // When creating SinkRecord, pass the logical topic from subscription
         let logical_topic = "/stripe/payments";
-        let record = SinkRecord::from_stream_message(
-            &message,
-            logical_topic,
-            &None,
-            &context,
-        )
-        .await
-        .unwrap();
+        let record = SinkRecord::from_stream_message(&message, logical_topic, &None, &context)
+            .await
+            .unwrap();
 
         // Verify that topic() returns the logical topic, not the partition topic from MessageID
         assert_eq!(record.topic(), "/stripe/payments");
-        
+
         // Verify other metadata is preserved
         assert_eq!(record.producer_name(), "test-producer");
         assert_eq!(record.publish_time(), 1234567890);

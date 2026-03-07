@@ -25,6 +25,8 @@ fn test_programmatic_connector_config() {
             poll_interval_ms: 50,
             metrics_port: 9091,
             log_level: "debug".to_string(),
+            health_check_interval_ms: 15000,
+            health_check_failure_threshold: 5,
         },
         schemas: vec![],
     };
@@ -35,6 +37,8 @@ fn test_programmatic_connector_config() {
     assert_eq!(config.retry.max_retries, 5);
     assert_eq!(config.processing.batch_size, 500);
     assert_eq!(config.processing.metrics_port, 9091);
+    assert_eq!(config.processing.health_check_interval_ms, 15000);
+    assert_eq!(config.processing.health_check_failure_threshold, 5);
 }
 
 #[test]
@@ -134,6 +138,8 @@ fn test_programmatic_processing_settings() {
         poll_interval_ms: 200,
         metrics_port: 8080,
         log_level: "trace".to_string(),
+        health_check_interval_ms: 10000,
+        health_check_failure_threshold: 4,
     };
 
     assert_eq!(processing.batch_size, 2000);
@@ -141,6 +147,8 @@ fn test_programmatic_processing_settings() {
     assert_eq!(processing.poll_interval_ms, 200);
     assert_eq!(processing.metrics_port, 8080);
     assert_eq!(processing.log_level, "trace");
+    assert_eq!(processing.health_check_interval_ms, 10000);
+    assert_eq!(processing.health_check_failure_threshold, 4);
 
     // Default processing settings
     let default_processing = ProcessingSettings::default();
@@ -149,6 +157,8 @@ fn test_programmatic_processing_settings() {
     assert_eq!(default_processing.poll_interval_ms, 100);
     assert_eq!(default_processing.metrics_port, 9090);
     assert_eq!(default_processing.log_level, "info");
+    assert_eq!(default_processing.health_check_interval_ms, 30000);
+    assert_eq!(default_processing.health_check_failure_threshold, 3);
 }
 
 #[test]
@@ -204,6 +214,8 @@ fn test_full_connector_config_with_all_features() {
             poll_interval_ms: 100,
             metrics_port: 9090,
             log_level: "info".to_string(),
+            health_check_interval_ms: 30000,
+            health_check_failure_threshold: 3,
         },
         schemas: vec![
             SchemaMapping {

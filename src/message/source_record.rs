@@ -1,6 +1,6 @@
 //! SourceRecord - messages from external systems to Danube
 
-use crate::{ConnectorError, ConnectorResult};
+use crate::{ConnectorError, ConnectorResult, RecordContext, RoutingContext};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -86,14 +86,14 @@ impl SourceRecord {
     pub fn from_number<T: Serialize>(topic: impl Into<String>, number: T) -> ConnectorResult<Self> {
         let value = serde_json::to_value(number)
             .map_err(|e| ConnectorError::Serialization(e.to_string()))?;
-        
+
         // Ensure it's actually a number
         if !value.is_number() {
             return Err(ConnectorError::Serialization(
                 "Value is not a number".to_string(),
             ));
         }
-        
+
         Ok(Self::new(topic, value))
     }
 
@@ -157,6 +157,26 @@ impl SourceRecord {
         self
     }
 
+    pub fn topic(&self) -> &str {
+        &self.topic
+    }
+
+    pub fn attributes(&self) -> &HashMap<String, String> {
+        &self.attributes
+    }
+
+    pub fn key(&self) -> Option<&str> {
+        self.key.as_deref()
+    }
+
+    pub fn routing_context(&self) -> RoutingContext<'_> {
+        RoutingContext::new(&self.topic, self.key(), None, &self.attributes)
+    }
+
+    pub fn context(&self) -> RecordContext<'_> {
+        RecordContext::new(self.routing_context(), None, None, None)
+    }
+
     /// Get the payload as a reference
     pub fn payload(&self) -> &Value {
         &self.payload
@@ -215,7 +235,10 @@ impl SourceRecord {
             "avro" => {
                 // Avro in Danube uses JSON serialization with schema validation
                 serde_json::to_vec(&self.payload).map_err(|e| {
-                    ConnectorError::Serialization(format!("Avro (JSON) serialization failed: {}", e))
+                    ConnectorError::Serialization(format!(
+                        "Avro (JSON) serialization failed: {}",
+                        e
+                    ))
                 })
             }
             "protobuf" => {
@@ -296,6 +319,29 @@ mod tests {
     }
 
     #[test]
+    fn test_source_record_context_accessors() {
+        let record = SourceRecord::new("/default/events", json!({"value": 1}))
+            .with_attribute("source", "test-connector")
+            .with_key("user-123");
+
+        let routing = record.routing_context();
+        assert_eq!(routing.topic(), "/default/events");
+        assert_eq!(routing.key(), Some("user-123"));
+        assert_eq!(routing.partition(), None);
+        assert_eq!(
+            routing.attributes().get("source"),
+            Some(&"test-connector".to_string())
+        );
+
+        let context = record.context();
+        assert_eq!(context.topic(), "/default/events");
+        assert_eq!(context.key(), Some("user-123"));
+        assert_eq!(context.publish_time(), None);
+        assert_eq!(context.producer_name(), None);
+        assert!(context.schema().is_none());
+    }
+
+    #[test]
     fn test_source_record_from_number() {
         // Integer
         let record = SourceRecord::from_number("/metrics/counter", 42).unwrap();
@@ -344,11 +390,9 @@ mod tests {
 
         // Verify base64 encoding
         let base64_data = record.payload["data"].as_str().unwrap();
-        let decoded = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            base64_data,
-        )
-        .unwrap();
+        let decoded =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, base64_data)
+                .unwrap();
         assert_eq!(decoded, data);
     }
 }
