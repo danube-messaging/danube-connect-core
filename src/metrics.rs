@@ -23,6 +23,10 @@ pub struct ConnectorMetrics {
 }
 
 impl ConnectorMetrics {
+    /// Initialize the global Prometheus exporter on the given port.
+    ///
+    /// This method is idempotent for the same port and returns an error if the
+    /// exporter was already initialized on a different port.
     pub fn initialize_exporter(port: u16) -> ConnectorResult<()> {
         let existing_port = METRICS_EXPORTER_PORT.get_or_init(|| port);
         if *existing_port != port {
@@ -210,6 +214,9 @@ impl ConnectorMetrics {
 }
 
 /// Timer for tracking processing duration
+///
+/// This timer starts immediately when created and increments the inflight gauge.
+/// When stopped, it records the elapsed duration and decrements the inflight count.
 #[allow(dead_code)]
 pub struct ProcessingTimer {
     start: std::time::Instant,
@@ -218,7 +225,7 @@ pub struct ProcessingTimer {
 
 #[allow(dead_code)]
 impl ProcessingTimer {
-    /// Create a new timer
+    /// Create a timer that starts immediately and increments the inflight gauge.
     pub fn new(metrics: ConnectorMetrics) -> Self {
         metrics.increment_inflight();
         Self {
@@ -227,7 +234,7 @@ impl ProcessingTimer {
         }
     }
 
-    /// Stop the timer and record the duration
+    /// Stop the timer, record the elapsed duration, and decrement inflight count.
     pub fn stop(self) {
         let duration = self.start.elapsed();
         self.metrics.record_processing_time(duration);

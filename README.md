@@ -12,15 +12,15 @@ Core SDK for building high-performance connectors for the [Danube messaging syst
 
 ### Key Features
 
-- 🔌 **Simple Trait-Based API** - Implement just `SinkConnector` or `SourceConnector` traits
+- 🔌 **Simple Trait-Based API** - Implement `SinkConnector` or `SourceConnector`
+- 📦 **Batch-First Sink Runtime** - Sink connectors process `Vec<SinkRecord>` batches
+- 🌊 **Polling or Streaming Sources** - Source connectors can use `poll()` or `start_streaming()`
 - 📋 **Schema Registry Integration** - Automatic schema-aware serialization/deserialization
-- 🔄 **Multi-Topic Support** - Handle multiple topics with different schemas per connector
-- 🎯 **Zero Schema Boilerplate** - Runtime handles all schema operations transparently
-- ⚙️ **Automatic Runtime Management** - Lifecycle, message loops, and graceful shutdown
-- 🔁 **Built-in Retry Logic** - Exponential backoff with jitter for resilient integrations
-- 📊 **Observability** - Prometheus metrics, structured logging, and health checks
-- 🛠️ **Message Utilities** - Batching, type conversion, and validation helpers
-- ⚡ **High Performance** - Async/await with Tokio, connection pooling, schema caching
+- 🔄 **Multi-Topic Routing** - Handle multiple topics with per-route dispatch and schema policy
+- ⚙️ **Automatic Runtime Management** - Lifecycle, retry, metrics, and graceful shutdown
+-  **Observability** - Prometheus metrics plus health-check hooks for connectors
+- 🛠️ **Message Utilities** - Batching, type conversion, routing, and record context helpers
+- ⚡ **Async Runtime** - Built on Tokio for efficient connector execution
 
 ## Core Concepts
 
@@ -28,46 +28,35 @@ Core SDK for building high-performance connectors for the [Danube messaging syst
 
 **`SinkConnector`** (Danube → External System)
 - Consume messages from Danube topics
-- Receive typed `serde_json::Value` data (already deserialized by runtime)
-- Write to external databases, APIs, or services
+- Receive batches of `SinkRecord`
+- Work with typed `serde_json::Value` payloads already deserialized by the runtime
+- Write to external databases, APIs, or services using `process_batch()`
 
 **`SourceConnector`** (External System → Danube)
 - Read from external systems
-- Provide typed `serde_json::Value` data
-- Runtime handles schema-aware serialization before publishing
+- Emit `SourceRecord` values wrapped in `SourceEnvelope`
+- Support both polling and streaming execution modes
+- Let the runtime handle schema-aware serialization before publishing
 
 ### Schema Registry Integration
 
 **The runtime automatically handles schema operations** - your connector works with typed data:
 
 **For Sink Connectors:**
-- Runtime deserializes messages based on their schema
-- You receive `SinkRecord` with typed `serde_json::Value` payload
-- Access data directly or deserialize to structs with `as_type<T>()`
-- Schema info available via `record.schema()`
+- Runtime deserializes broker payloads using schema metadata
+- `SinkRecord` exposes typed `serde_json::Value` payloads plus schema/context helpers
+- You can deserialize to your domain type with `record.as_type::<T>()`
 
 **For Source Connectors:**
-- Create `SourceRecord` with typed data using helper methods
-- Runtime serializes based on topic's configured schema
-- Automatic schema registration and validation
-- Support for JSON Schema, String, Bytes, Number, and Avro (Protobuf coming soon)
+- Runtime matches configured schema policy to the target topic
+- Source payloads are serialized according to the configured schema type
+- Schemas can be auto-registered and versioned through `SchemaMapping` / `SchemaConfig`
 
 **Benefits:**
 - ✅ Zero schema boilerplate in connector code
-- ✅ Type safety and data validation
-- ✅ Managed schema evolution with version strategies
-- ✅ Automatic caching for performance
-- ✅ Centralized schema management
-
-### Runtime Management
-
-Both `SinkRuntime` and `SourceRuntime` handle:
-- Schema registry client initialization and caching
-- Schema-aware serialization/deserialization
-- Message polling and processing loops
-- Automatic retry with exponential backoff
-- Graceful shutdown and signal handling
-- Prometheus metrics and health checks
+- ✅ Centralized schema registration and validation
+- ✅ Generic record/context APIs that stay platform-agnostic
+- ✅ Cached schema lookups for repeated use
 
 ### Configuration
 
@@ -78,12 +67,16 @@ Connectors can be configured in two ways:
 danube_service_url = "http://localhost:6650"
 connector_name = "my-connector"
 
+[processing]
+batch_size = 500
+batch_timeout_ms = 1000
+
 [[schemas]]
 topic = "/events/users"
 subject = "user-events-schema"
 schema_type = "json_schema"
 schema_file = "schemas/user-event.json"
-version_strategy = "latest"  # or "pinned" or "minimum"
+version_strategy = "latest"
 
 # Include connector-specific settings
 [mqtt]
@@ -101,7 +94,9 @@ let config = ConnectorConfig {
 };
 ```
 
-See **[Programmatic Configuration Guide](./programmatic_config.md)** for complete details.
+For file-based loading in standalone connectors, use `ConnectorConfigLoader`.
+
+See **[Programmatic Configuration Guide](./programmatic_config.md)** for embedding-oriented examples.
 
 The runtime automatically:
 - Loads schema definitions from files
@@ -115,7 +110,8 @@ The runtime automatically:
 - `payload()` - Returns `&serde_json::Value` (typed data, already deserialized)
 - `as_type<T>()` - Deserialize to specific Rust type
 - `schema()` - Schema metadata (subject, version, type)
-- `topic()`, `offset()`, `attributes()`, `publish_time()` - Message metadata
+- `topic()`, `partition()`, `attributes()`, `publish_time()` - Message metadata
+- `routing_context()` / `context()` - Generic routing and record metadata helpers
 
 **`SourceRecord`** - Messages to Danube
 - `new(topic, payload)` - Create from `serde_json::Value`
@@ -125,6 +121,12 @@ The runtime automatically:
 - `from_avro(topic, data)` - Create from Avro-compatible struct
 - `from_bytes(topic, data)` - Create from binary data
 - `with_attribute()`, `with_key()` - Add metadata
+- `routing_context()` / `context()` - Inspect generic routing metadata
+
+**`SourceEnvelope`** - Source records plus optional checkpoint information
+- `SourceEnvelope::new(record)` - Emit a record with no offset
+- `SourceEnvelope::with_offset(record, offset)` - Emit a record plus checkpoint data
+- Used by `SourceConnector::poll()` and `SourceSender`
 
 ### Utilities
 
@@ -138,7 +140,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-danube-connect-core = "0.3"
+danube-connect-core = "0.5"
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 ```
@@ -149,8 +151,9 @@ async-trait = "0.1"
 
 - 📖 **[Connector Overview](https://danube-docs.dev-state.com/integrations/danube_connect_overview/)** - Introduction and key concepts
 - 🏗️ **[Architecture Guide](https://danube-docs.dev-state.com/integrations/danube_connect_architecture/)** - Design, patterns, and schema registry
-- 🛠️ **[Development Guide](https://danube-docs.dev-state.com/integrations/danube_connect_development/)** - Build your own connector with schema registry
-- ⚙️ **[Programmatic Configuration](./programmatic_config.md)** - Use connectors in your application without TOML files
+- 🛠️ **[Sink Connector Development Guide](https://danube-docs.dev-state.com/integrations/sink_connector_development/)** - Build batch-first sink connectors
+- 🛠️ **[Source Connector Development Guide](https://danube-docs.dev-state.com/integrations/source_connector_development/)** - Build polling or streaming source connectors
+- ⚙️ **[Programmatic Configuration](./programmatic_config.md)** - Embed runtimes in your own application
 
 ### API Reference
 
@@ -172,14 +175,13 @@ async-trait = "0.1"
 `danube-connect-core` is optimized for production workloads:
 
 - **Async/await** - Built on Tokio for efficient async I/O
-- **Schema caching** - Automatic in-memory schema cache with LRU eviction
-- **Batching** - Process messages in configurable batches for higher throughput
-- **Connection pooling** - Reuse connections to external systems and Danube
+- **Schema caching** - Automatic in-memory schema lookups for efficient reuse
+- **Batching** - Configurable sink batching and source publish loops
+- **Runtime reuse** - Shared runtime logic for retries, metrics, and lifecycle
 - **Metrics** - Built-in Prometheus metrics for monitoring and alerting
-- **Health checks** - HTTP endpoint for Kubernetes liveness/readiness probes
+- **Context helpers** - Generic routing and record context without platform-specific coupling
 
-See the [Development Guide](https://danube-docs.dev-state.com/integrations/danube_connect_development/) for schema evolution strategies and production deployment patterns.
-
+See the connector development guides above for schema evolution strategies and deployment patterns.
 
 ## Contributing
 

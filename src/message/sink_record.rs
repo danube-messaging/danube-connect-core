@@ -226,24 +226,34 @@ impl SinkRecord {
     }
 
     /// Get schema information for this message
+    ///
+    /// Returns `None` if the message does not have a schema.
     pub fn schema(&self) -> Option<&SchemaInfo> {
         self.schema_info.as_ref()
     }
 
+    /// Get the partition identifier for this record, if available.
+    ///
+    /// Returns `None` if the message does not have a partition identifier.
     pub fn partition(&self) -> Option<&str> {
         self.partition.as_deref()
     }
 
     /// Access message attributes (user-defined properties)
+    ///
+    /// Returns a reference to the map of attributes.
     pub fn attributes(&self) -> &HashMap<String, String> {
         &self.attributes
     }
 
     /// Get a specific attribute value
+    ///
+    /// Returns `None` if the attribute is not present.
     pub fn get_attribute(&self, key: &str) -> Option<&str> {
         self.attributes.get(key).map(|s| s.as_str())
     }
 
+    /// Return `true` when an attribute with the given key is present.
     pub fn has_attribute(&self, key: &str) -> bool {
         self.attributes.contains_key(key)
     }
@@ -263,10 +273,16 @@ impl SinkRecord {
         &self.danube_metadata.producer_name
     }
 
+    /// Build a lightweight routing view over this record.
+    ///
+    /// This method returns a `RoutingContext` instance that provides access to the topic, partition, and attributes.
     pub fn routing_context(&self) -> RoutingContext<'_> {
         RoutingContext::new(self.topic(), None, self.partition(), &self.attributes)
     }
 
+    /// Build the full contextual view for this record, including Danube metadata.
+    ///
+    /// This method returns a `RecordContext` instance that provides access to the topic, publish time, producer name, and schema information.
     pub fn context(&self) -> RecordContext<'_> {
         RecordContext::new(
             self.routing_context(),

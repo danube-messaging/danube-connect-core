@@ -1,12 +1,16 @@
 use crate::config::{ConsumerConfig, ProducerConfig, SchemaConfig, SubscriptionType};
 
+/// Schema-related routing policy shared by sink and source routes.
 #[derive(Debug, Clone)]
 pub struct RouteSchemaPolicy {
+    /// Expected input schema subject for sink-side validation.
     pub expected_subject: Option<String>,
+    /// Output schema configuration used when producing records.
     pub output_schema: Option<SchemaConfig>,
 }
 
 impl RouteSchemaPolicy {
+    /// Create a schema policy with no expected subject and no output schema.
     pub fn none() -> Self {
         Self {
             expected_subject: None,
@@ -151,14 +155,19 @@ impl From<SourceRoute> for ProducerConfig {
     }
 }
 
+/// Subscription behavior for a sink route.
 #[derive(Debug, Clone)]
 pub struct RouteSubscriptionPolicy {
+    /// Consumer name used when creating the Danube consumer.
     pub consumer_name: String,
+    /// Subscription name shared by consumers of the same route.
     pub subscription: String,
+    /// Danube subscription type for this route.
     pub subscription_type: SubscriptionType,
 }
 
 impl RouteSubscriptionPolicy {
+    /// Create a subscription policy from explicit consumer settings.
     pub fn new(
         consumer_name: impl Into<String>,
         subscription: impl Into<String>,
@@ -172,13 +181,17 @@ impl RouteSubscriptionPolicy {
     }
 }
 
+/// Dispatch behavior for a source route.
 #[derive(Debug, Clone)]
 pub struct RouteDispatchPolicy {
+    /// Number of partitions to configure for the destination topic.
     pub partitions: usize,
+    /// Whether the route should use reliable dispatch semantics.
     pub reliable_dispatch: bool,
 }
 
 impl RouteDispatchPolicy {
+    /// Create a dispatch policy for a source route.
     pub fn new(partitions: usize, reliable_dispatch: bool) -> Self {
         Self {
             partitions,
@@ -187,14 +200,19 @@ impl RouteDispatchPolicy {
     }
 }
 
+/// Complete sink-side routing definition derived from `ConsumerConfig`.
 #[derive(Debug, Clone)]
 pub struct SinkRoute {
+    /// Danube topic consumed by this route.
     pub topic: String,
+    /// Subscription policy used to create the consumer.
     pub subscription: RouteSubscriptionPolicy,
+    /// Schema expectations applied to consumed records.
     pub schema: RouteSchemaPolicy,
 }
 
 impl SinkRoute {
+    /// Create a sink route from its topic, subscription, and schema policy.
     pub fn new(
         topic: impl Into<String>,
         subscription: RouteSubscriptionPolicy,
@@ -208,14 +226,19 @@ impl SinkRoute {
     }
 }
 
+/// Complete source-side routing definition derived from `ProducerConfig`.
 #[derive(Debug, Clone)]
 pub struct SourceRoute {
+    /// Danube topic produced by this route.
     pub topic: String,
+    /// Dispatch policy used when creating the producer.
     pub dispatch: RouteDispatchPolicy,
+    /// Schema configuration applied when publishing records.
     pub schema: RouteSchemaPolicy,
 }
 
 impl SourceRoute {
+    /// Create a source route from its topic, dispatch, and schema policy.
     pub fn new(
         topic: impl Into<String>,
         dispatch: RouteDispatchPolicy,

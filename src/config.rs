@@ -40,18 +40,31 @@ pub struct ConnectorConfig {
     pub schemas: Vec<SchemaMapping>,
 }
 
+/// Trait for applying environment-variable overrides after deserialization.
+///
+/// Implementors can override this trait to apply environment-specific settings
+/// to their configuration values.
 pub trait ConfigEnvOverrides {
+    /// Apply environment-specific overrides to a deserialized configuration value.
     fn apply_env_overrides(&mut self) -> ConnectorResult<()> {
         Ok(())
     }
 }
 
+/// Trait for validating configuration values after loading.
+///
+/// Implementors can override this trait to validate their configuration values
+/// and return an error for invalid settings.
 pub trait ConfigValidate {
+    /// Validate the loaded configuration and return an error for invalid settings.
     fn validate_config(&self) -> ConnectorResult<()> {
         Ok(())
     }
 }
 
+/// Helper for loading connector configuration from TOML files and environment variables.
+///
+/// This loader provides a flexible way to load configuration values from various sources.
 #[derive(Debug, Clone)]
 pub struct ConnectorConfigLoader {
     config_path_env: String,
@@ -66,15 +79,18 @@ impl Default for ConnectorConfigLoader {
 }
 
 impl ConnectorConfigLoader {
+    /// Create a loader that reads the configuration path from `CONNECTOR_CONFIG_PATH`.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Override the environment variable used to locate the configuration file.
     pub fn with_path_env(mut self, env_var: impl Into<String>) -> Self {
         self.config_path_env = env_var.into();
         self
     }
 
+    /// Load a configuration value from the configured path environment variable.
     pub fn load<T>(&self) -> ConnectorResult<T>
     where
         T: DeserializeOwned + ConfigEnvOverrides + ConfigValidate,
@@ -89,6 +105,7 @@ impl ConnectorConfigLoader {
         self.from_file(config_path)
     }
 
+    /// Load a configuration value from a TOML file path.
     pub fn from_file<T>(&self, path: impl AsRef<Path>) -> ConnectorResult<T>
     where
         T: DeserializeOwned + ConfigEnvOverrides + ConfigValidate,
@@ -106,6 +123,7 @@ impl ConnectorConfigLoader {
         self.parse_str(&content, &source_name)
     }
 
+    /// Parse a configuration value directly from TOML content.
     pub fn parse_str<T>(&self, content: &str, source_name: &str) -> ConnectorResult<T>
     where
         T: DeserializeOwned + ConfigEnvOverrides + ConfigValidate,
@@ -124,6 +142,7 @@ impl ConnectorConfigLoader {
 }
 
 impl ConnectorConfig {
+    /// Load `ConnectorConfig` using `ConnectorConfigLoader` defaults.
     pub fn load() -> ConnectorResult<Self> {
         ConnectorConfigLoader::new().load()
     }
@@ -294,9 +313,11 @@ pub struct ProcessingSettings {
     #[serde(default = "default_log_level")]
     pub log_level: String,
 
+    /// Interval between health checks, in milliseconds.
     #[serde(default = "default_health_check_interval_ms")]
     pub health_check_interval_ms: u64,
 
+    /// Number of consecutive failed health checks before reporting unhealthy status.
     #[serde(default = "default_health_check_failure_threshold")]
     pub health_check_failure_threshold: usize,
 }
@@ -384,8 +405,11 @@ fn default_auto_register() -> bool {
 /// Mirrors `SubType` from danube-client but with Serialize/Deserialize for config files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SubscriptionType {
+    /// Only one consumer on the subscription receives messages.
     Exclusive,
+    /// Multiple consumers can share message delivery.
     Shared,
+    /// A standby consumer takes over when the active consumer fails.
     FailOver,
 }
 
@@ -420,10 +444,12 @@ pub struct ConsumerConfig {
 }
 
 impl ConsumerConfig {
+    /// Convert this consumer configuration into the route representation used by the runtime.
     pub fn route(&self) -> SinkRoute {
         self.clone().into()
     }
 
+    /// Build a consumer configuration from a sink route definition.
     pub fn from_route(route: SinkRoute) -> Self {
         route.into()
     }
@@ -462,10 +488,12 @@ impl ProducerConfig {
         }
     }
 
+    /// Convert this producer configuration into the route representation used by the runtime.
     pub fn route(&self) -> SourceRoute {
         self.clone().into()
     }
 
+    /// Build a producer configuration from a source route definition.
     pub fn from_route(route: SourceRoute) -> Self {
         route.into()
     }

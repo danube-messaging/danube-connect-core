@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tracing::info;
 
 // Re-export danube_client::SchemaType as the canonical type
+/// Canonical schema type enum used by connector configuration and schema registration.
 pub use danube_client::SchemaType;
 
 /// Schema registry handler for connector schema operations

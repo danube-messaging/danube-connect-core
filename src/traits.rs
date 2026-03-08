@@ -215,10 +215,20 @@ pub trait SourceConnector: Send + Sync {
     /// Vector of `ProducerConfig` objects, one for each destination topic.
     async fn producer_configs(&self) -> ConnectorResult<Vec<ProducerConfig>>;
 
+    /// Select the runtime mode used by this source connector.
+    ///
+    /// Return `SourceConnectorMode::Polling` for connectors that periodically
+    /// fetch data via `poll()`. Return `SourceConnectorMode::Streaming` for
+    /// connectors that push records asynchronously via `start_streaming()`.
     fn mode(&self) -> SourceConnectorMode {
         SourceConnectorMode::Polling
     }
 
+    /// Start a streaming source connector.
+    ///
+    /// Connectors that return `SourceConnectorMode::Streaming` should override
+    /// this method and use the provided `SourceSender` to emit records as they
+    /// become available.
     async fn start_streaming(&mut self, _sender: SourceSender) -> ConnectorResult<()> {
         Err(ConnectorError::config(
             "start_streaming() not implemented for this source connector",
@@ -269,22 +279,35 @@ pub trait SourceConnector: Send + Sync {
     }
 }
 
+/// Execution model for a source connector.
+///
+/// This enum determines how the source connector interacts with the runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceConnectorMode {
+    /// The runtime repeatedly calls `poll()` to fetch new data.
     Polling,
+    /// The connector pushes new data through `start_streaming()`.
     Streaming,
 }
 
+/// Handle used by streaming connectors to emit records into the runtime.
+///
+/// This struct provides methods to send records to the runtime for publishing.
 #[derive(Clone)]
 pub struct SourceSender {
     sender: mpsc::Sender<SourceEnvelope>,
 }
 
 impl SourceSender {
+    /// Create a new `SourceSender` instance.
     pub(crate) fn new(sender: mpsc::Sender<SourceEnvelope>) -> Self {
         Self { sender }
     }
 
+    /// Send a single record envelope to the runtime.
+    ///
+    /// This method is used by streaming connectors to emit records as they become
+    /// available.
     pub async fn send(&self, envelope: impl Into<SourceEnvelope>) -> ConnectorResult<()> {
         self.sender
             .send(envelope.into())
@@ -292,6 +315,10 @@ impl SourceSender {
             .map_err(|e| ConnectorError::fatal(format!("failed to emit source envelope: {}", e)))
     }
 
+    /// Send multiple record envelopes to the runtime in sequence.
+    ///
+    /// This method is used by streaming connectors to emit multiple records at
+    /// once.
     pub async fn send_batch<I>(&self, envelopes: I) -> ConnectorResult<()>
     where
         I: IntoIterator,
@@ -304,18 +331,26 @@ impl SourceSender {
         Ok(())
     }
 
+    /// Return `true` when the receiving side of the runtime channel is closed.
     pub fn is_closed(&self) -> bool {
         self.sender.is_closed()
     }
 }
 
+/// A source record together with optional checkpoint information.
+///
+/// This struct represents a single record emitted by a source connector, along
+/// with optional checkpoint information.
 #[derive(Debug, Clone)]
 pub struct SourceEnvelope {
+    /// The record to publish to Danube.
     pub record: SourceRecord,
+    /// Optional offset/checkpoint to commit after successful publish.
     pub offset: Option<Offset>,
 }
 
 impl SourceEnvelope {
+    /// Create an envelope without checkpoint information.
     pub fn new(record: SourceRecord) -> Self {
         Self {
             record,
@@ -323,6 +358,7 @@ impl SourceEnvelope {
         }
     }
 
+    /// Create an envelope with an offset to commit after successful delivery.
     pub fn with_offset(record: SourceRecord, offset: Offset) -> Self {
         Self {
             record,
@@ -330,14 +366,17 @@ impl SourceEnvelope {
         }
     }
 
+    /// Borrow the record carried by this envelope.
     pub fn record(&self) -> &SourceRecord {
         &self.record
     }
 
+    /// Borrow the offset carried by this envelope, if present.
     pub fn offset(&self) -> Option<&Offset> {
         self.offset.as_ref()
     }
 
+    /// Split this envelope into its record and optional offset parts.
     pub fn into_parts(self) -> (SourceRecord, Option<Offset>) {
         (self.record, self.offset)
     }

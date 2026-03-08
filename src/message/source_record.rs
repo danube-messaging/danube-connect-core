@@ -140,44 +140,86 @@ impl SourceRecord {
     }
 
     /// Add an attribute
+    ///
+    /// Adds a single attribute to the record.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut record = SourceRecord::new("/default/events", json!("test"));
+    /// record = record.with_attribute("source", "test-connector");
+    /// ```
     pub fn with_attribute(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.attributes.insert(key.into(), value.into());
         self
     }
 
     /// Add multiple attributes
+    ///
+    /// Adds multiple attributes to the record.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut record = SourceRecord::new("/default/events", json!("test"));
+    /// let attrs = HashMap::from([("source", "test-connector"), ("version", "1.0")]);
+    /// record = record.with_attributes(attrs);
+    /// ```
     pub fn with_attributes(mut self, attrs: HashMap<String, String>) -> Self {
         self.attributes.extend(attrs);
         self
     }
 
     /// Set the routing key for partitioned topics
+    ///
+    /// Sets the routing key for the record.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut record = SourceRecord::new("/default/events", json!("test"));
+    /// record = record.with_key("user-123");
+    /// ```
     pub fn with_key(mut self, key: impl Into<String>) -> Self {
         self.key = Some(key.into());
         self
     }
 
+    /// Get the destination topic for this record.
+    ///
+    /// Returns the topic where the record will be published.
     pub fn topic(&self) -> &str {
         &self.topic
     }
 
+    /// Get the user-defined attributes attached to this record.
+    ///
+    /// Returns a reference to the attributes map.
     pub fn attributes(&self) -> &HashMap<String, String> {
         &self.attributes
     }
 
+    /// Get the routing key used for partitioned publishing, if present.
+    ///
+    /// Returns the routing key as an `Option`.
     pub fn key(&self) -> Option<&str> {
         self.key.as_deref()
     }
 
+    /// Build a lightweight routing view over this record.
+    ///
+    /// Returns a `RoutingContext` instance.
     pub fn routing_context(&self) -> RoutingContext<'_> {
         RoutingContext::new(&self.topic, self.key(), None, &self.attributes)
     }
 
+    /// Build the full contextual view for this record.
+    ///
+    /// Returns a `RecordContext` instance.
     pub fn context(&self) -> RecordContext<'_> {
         RecordContext::new(self.routing_context(), None, None, None)
     }
 
     /// Get the payload as a reference
+    ///
+    /// Returns a reference to the payload `Value`.
     pub fn payload(&self) -> &Value {
         &self.payload
     }

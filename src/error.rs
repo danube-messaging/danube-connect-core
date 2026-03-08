@@ -17,8 +17,10 @@ pub enum ConnectorError {
     /// Examples: network timeouts, temporary service unavailability, rate limits
     #[error("Retryable error: {message}")]
     Retryable {
+        /// Human-readable error description.
         message: String,
         #[source]
+        /// Optional underlying source error.
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
 
@@ -27,8 +29,10 @@ pub enum ConnectorError {
     /// Examples: authentication failures, invalid configuration, incompatible versions
     #[error("Fatal error: {message}")]
     Fatal {
+        /// Human-readable error description.
         message: String,
         #[source]
+        /// Optional underlying source error.
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
 
@@ -36,7 +40,12 @@ pub enum ConnectorError {
     ///
     /// Examples: malformed JSON, schema validation failure, corrupt data
     #[error("Invalid data: {message}")]
-    InvalidData { message: String, payload: Vec<u8> },
+    InvalidData {
+        /// Human-readable description of why the payload is invalid.
+        message: String,
+        /// Original payload bytes that failed validation or decoding.
+        payload: Vec<u8>,
+    },
 
     /// Configuration error - detected at startup
     #[error("Configuration error: {0}")]

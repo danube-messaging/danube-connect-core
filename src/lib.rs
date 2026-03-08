@@ -90,5 +90,7 @@ pub use utils::{Batcher, HealthChecker, HealthStatus};
 pub use danube_client::{SchemaInfo, SubType};
 
 // Version info
+/// Crate version for the currently built `danube-connect-core` package.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Crate name for the currently built `danube-connect-core` package.
 pub const NAME: &str = env!("CARGO_PKG_NAME");
