@@ -10,8 +10,8 @@
 
 use async_trait::async_trait;
 use danube_connect_core::{
-    ConnectorConfig, ConnectorResult, ProcessingSettings, ProducerConfig, RetrySettings,
-    SchemaMapping, SourceConnector, SourceRecord, SourceRuntime, VersionStrategy,
+    ConnectorConfig, ConnectorResult, Offset, ProcessingSettings, ProducerConfig, RetrySettings,
+    SchemaMapping, SourceConnector, SourceEnvelope, SourceRecord, SourceRuntime, VersionStrategy,
 };
 use std::time::Duration;
 
@@ -53,7 +53,7 @@ impl SourceConnector for SchemaSourceConnector {
         }])
     }
 
-    async fn poll(&mut self) -> ConnectorResult<Vec<SourceRecord>> {
+    async fn poll(&mut self) -> ConnectorResult<Vec<SourceEnvelope>> {
         // Check if we've reached the limit
         if self.counter >= self.max_messages {
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -82,7 +82,10 @@ impl SourceConnector for SchemaSourceConnector {
                 .with_attribute("message_number", self.counter.to_string())
                 .with_attribute("batch_index", i.to_string());
 
-            records.push(record);
+            records.push(SourceEnvelope::with_offset(
+                record,
+                Offset::new("generated", self.counter),
+            ));
 
             println!("Generated schema message #{}", self.counter);
         }

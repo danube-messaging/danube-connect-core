@@ -4,22 +4,23 @@
 //! dynamic multi-producer management.
 
 use crate::{
-    ConnectorConfig, ConnectorError, ConnectorMetrics, ConnectorResult, SchemaConfig,
-    SourceConnector, SourceRecord, VersionStrategy,
+    ConnectorConfig, ConnectorError, ConnectorMetrics, ConnectorResult, HealthChecker,
+    HealthStatus, SchemaConfig, SourceConnector, SourceConnectorMode, SourceEnvelope, SourceSender,
+    VersionStrategy,
 };
 use danube_client::{DanubeClient, Producer};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio::time::Instant;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Runtime for Source Connectors (External System → Danube)
 ///
 /// Manages multiple producers for publishing to Danube topics. All producers are
 /// created upfront based on connector configuration.
-/// Create with `SourceRuntime::new()` and run with `.run().await`.
 pub struct SourceRuntime<C: SourceConnector> {
     connector: C,
     client: DanubeClient,
@@ -27,6 +28,7 @@ pub struct SourceRuntime<C: SourceConnector> {
     config: ConnectorConfig,
     metrics: Arc<ConnectorMetrics>,
     shutdown: Arc<AtomicBool>,
+    health_checker: HealthChecker,
     /// Schema configurations by topic (for schema registry support)
     schema_configs: HashMap<String, SchemaConfig>,
     /// Shared context with schema client and caching
@@ -38,6 +40,8 @@ impl<C: SourceConnector> SourceRuntime<C> {
     pub async fn new(connector: C, config: ConnectorConfig) -> ConnectorResult<Self> {
         // Validate configuration
         config.validate()?;
+
+        ConnectorMetrics::initialize_exporter(config.processing.metrics_port)?;
 
         // Initialize tracing
         Self::init_tracing(&config);
@@ -59,6 +63,7 @@ impl<C: SourceConnector> SourceRuntime<C> {
 
         // Create connector context
         let context = Arc::new(crate::runtime::ConnectorContext::new(client.clone()));
+        let health_check_failure_threshold = config.processing.health_check_failure_threshold;
 
         Ok(Self {
             connector,
@@ -67,6 +72,7 @@ impl<C: SourceConnector> SourceRuntime<C> {
             config,
             metrics,
             shutdown: Arc::new(AtomicBool::new(false)),
+            health_checker: HealthChecker::new(health_check_failure_threshold),
             schema_configs: HashMap::new(), // Will be populated in initialize_schemas
             context,
         })
@@ -86,8 +92,14 @@ impl<C: SourceConnector> SourceRuntime<C> {
         self.initialize_connector().await?;
         self.create_producers().await?;
 
-        // Main polling loop
-        self.process_polling_loop().await?;
+        match self.connector.mode() {
+            SourceConnectorMode::Polling => {
+                self.process_polling_loop().await?;
+            }
+            SourceConnectorMode::Streaming => {
+                self.process_streaming_loop().await?;
+            }
+        }
 
         // Graceful shutdown
         self.shutdown_connector().await?;
@@ -199,7 +211,7 @@ impl<C: SourceConnector> SourceRuntime<C> {
                 }
             }
 
-            let mut producer = producer_builder.build();
+            let mut producer = producer_builder.build()?;
             producer.create().await.map_err(|e| {
                 ConnectorError::fatal_with_source(
                     format!("Failed to create producer for topic {}", topic),
@@ -219,8 +231,16 @@ impl<C: SourceConnector> SourceRuntime<C> {
     async fn process_polling_loop(&mut self) -> ConnectorResult<()> {
         info!("Entering main polling loop");
         let poll_interval = Duration::from_millis(self.config.processing.poll_interval_ms);
+        let health_check_interval =
+            Duration::from_millis(self.config.processing.health_check_interval_ms);
+        let mut last_health_check = Instant::now();
 
         while !self.shutdown.load(Ordering::Relaxed) {
+            if last_health_check.elapsed() >= health_check_interval {
+                self.run_health_check().await?;
+                last_health_check = Instant::now();
+            }
+
             match self.connector.poll().await {
                 Ok(records) if !records.is_empty() => {
                     info!("Polled {} records", records.len());
@@ -255,17 +275,118 @@ impl<C: SourceConnector> SourceRuntime<C> {
         Ok(())
     }
 
+    async fn process_streaming_loop(&mut self) -> ConnectorResult<()> {
+        info!("Entering main streaming loop");
+
+        let channel_capacity = self.config.processing.batch_size.max(1);
+        let (sender, mut receiver) = mpsc::channel(channel_capacity);
+        let source_sender = SourceSender::new(sender);
+        let health_check_interval =
+            Duration::from_millis(self.config.processing.health_check_interval_ms);
+        let mut last_health_check = Instant::now();
+
+        self.connector.start_streaming(source_sender).await?;
+
+        while !self.shutdown.load(Ordering::Relaxed) {
+            if last_health_check.elapsed() >= health_check_interval {
+                self.run_health_check().await?;
+                last_health_check = Instant::now();
+            }
+
+            let first = match tokio::time::timeout(
+                Duration::from_millis(self.config.processing.poll_interval_ms.max(1)),
+                receiver.recv(),
+            )
+            .await
+            {
+                Ok(Some(envelope)) => envelope,
+                Ok(None) => break,
+                Err(_) => continue,
+            };
+
+            let mut batch = vec![first];
+            while batch.len() < self.config.processing.batch_size {
+                match receiver.try_recv() {
+                    Ok(envelope) => batch.push(envelope),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                }
+            }
+
+            self.metrics.record_batch_size(batch.len());
+            match self.publish_batch(batch).await {
+                Ok(offsets) => {
+                    if let Err(e) = self.connector.commit(offsets).await {
+                        error!("Failed to commit offsets: {}", e);
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to publish batch: {}", e);
+                    self.metrics.record_error(&format!("{:?}", e));
+                }
+            }
+        }
+
+        while let Ok(envelope) = receiver.try_recv() {
+            match self.publish_batch(vec![envelope]).await {
+                Ok(offsets) => {
+                    if let Err(e) = self.connector.commit(offsets).await {
+                        error!("Failed to commit offsets: {}", e);
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to publish batch during shutdown drain: {}", e);
+                    self.metrics.record_error(&format!("{:?}", e));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Run health check
+    async fn run_health_check(&mut self) -> ConnectorResult<()> {
+        match self.connector.health_check().await {
+            Ok(()) => {
+                self.health_checker.record_success();
+                self.metrics.set_health(true);
+                Ok(())
+            }
+            Err(e) => {
+                self.health_checker.record_failure();
+                self.metrics
+                    .set_health(self.health_checker.status() != HealthStatus::Unhealthy);
+
+                if self.health_checker.status() == HealthStatus::Unhealthy {
+                    return Err(ConnectorError::fatal(format!(
+                        "Connector health check failed {} consecutive times: {}",
+                        self.health_checker.consecutive_failures(),
+                        e
+                    )));
+                }
+
+                warn!(
+                    "Connector health check failed (attempt {}): {}",
+                    self.health_checker.consecutive_failures(),
+                    e
+                );
+                Ok(())
+            }
+        }
+    }
+
     /// Publish a batch of records to their respective topics
     ///
     /// Records are routed to pre-created producers based on their topic field.
     /// Each record's routing key (if present) will be used for partition selection.
     async fn publish_batch(
         &mut self,
-        records: Vec<SourceRecord>,
+        records: Vec<SourceEnvelope>,
     ) -> ConnectorResult<Vec<crate::traits::Offset>> {
         let mut offsets = Vec::new();
 
-        for (idx, record) in records.into_iter().enumerate() {
+        for envelope in records {
+            let (record, offset) = envelope.into_parts();
             let start = Instant::now();
             let topic = &record.topic;
 
@@ -307,9 +428,9 @@ impl<C: SourceConnector> SourceRuntime<C> {
                     self.metrics.record_success();
                     debug!("Message sent successfully: {}", message_id);
 
-                    // Create offset
-                    let offset = crate::traits::Offset::new(record.topic, idx as u64);
-                    offsets.push(offset);
+                    if let Some(offset) = offset {
+                        offsets.push(offset);
+                    }
                 }
                 Err(e) => {
                     error!("Failed to publish message: {}", e);

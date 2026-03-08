@@ -1,9 +1,11 @@
 //! Connector trait definitions.
 
 use crate::{
-    ConnectorConfig, ConnectorResult, ConsumerConfig, ProducerConfig, SinkRecord, SourceRecord,
+    ConnectorConfig, ConnectorError, ConnectorResult, ConsumerConfig, ProducerConfig, SinkRecord,
+    SourceRecord,
 };
 use async_trait::async_trait;
+use tokio::sync::mpsc;
 
 /// Trait for implementing Sink Connectors (Danube → External System)
 ///
@@ -39,8 +41,11 @@ use async_trait::async_trait;
 ///         }])
 ///     }
 ///     
-///     async fn process(&mut self, record: SinkRecord) -> ConnectorResult<()> {
-///         // Send HTTP POST request with self.target_url
+///     async fn process_batch(&mut self, records: Vec<SinkRecord>) -> ConnectorResult<()> {
+///         // Send a batch to the external system
+///         for record in records {
+///             let _ = record;
+///         }
 ///         Ok(())
 ///     }
 /// }
@@ -78,26 +83,25 @@ pub trait SinkConnector: Send + Sync {
     /// This method is called after `initialize()` and before message processing begins.
     async fn consumer_configs(&self) -> ConnectorResult<Vec<ConsumerConfig>>;
 
-    /// Process a single message from Danube
+    /// Process a batch of messages from Danube
     ///
-    /// This method is called for each message received from the Danube topic.
+    /// This method is called by the runtime whenever the configured batch size or
+    /// batch timeout is reached. Connectors should treat this as the primary sink
+    /// write path.
     ///
     /// # Return Value
     ///
-    /// - `Ok(())`: Message processed successfully, will be acknowledged
-    /// - `Err(ConnectorError::Retryable)`: Transient failure, message will be retried
+    /// - `Ok(())`: Batch processed successfully, messages will be acknowledged
+    /// - `Err(ConnectorError::Retryable)`: Transient failure, batch will be retried
     /// - `Err(ConnectorError::Fatal)`: Permanent failure, connector will stop
-    /// - `Err(ConnectorError::InvalidData)`: Bad message, will be skipped or sent to DLQ
+    /// - `Err(ConnectorError::InvalidData)`: Invalid batch content or message data
     ///
     /// # Errors
     ///
     /// Return appropriate error type based on the failure scenario
-    async fn process(&mut self, record: SinkRecord) -> ConnectorResult<()>;
+    async fn process_batch(&mut self, records: Vec<SinkRecord>) -> ConnectorResult<()>;
 
-    /// Process a batch of messages for better throughput
-    ///
-    /// Override this method to implement batch processing for better performance.
-    /// The default implementation calls `process()` for each record sequentially.
+    /// Optional: Called before shutdown for cleanup
     ///
     /// # Example
     ///
@@ -117,23 +121,14 @@ pub trait SinkConnector: Send + Sync {
     /// #             expected_schema_subject: None,
     /// #         }])
     /// #     }
-    /// #     async fn process(&mut self, record: SinkRecord) -> ConnectorResult<()> { Ok(()) }
     /// async fn process_batch(&mut self, records: Vec<SinkRecord>) -> ConnectorResult<()> {
     ///     // Bulk insert all records in one operation
     ///     // self.database.bulk_insert(&records).await?;
+    ///     let _ = records;
     ///     Ok(())
     /// }
     /// # }
     /// ```
-    async fn process_batch(&mut self, records: Vec<SinkRecord>) -> ConnectorResult<()> {
-        for record in records {
-            self.process(record).await?;
-        }
-        Ok(())
-    }
-
-    /// Optional: Called before shutdown for cleanup
-    ///
     /// Use this to:
     /// - Flush any pending writes
     /// - Close connections gracefully
@@ -144,7 +139,6 @@ pub trait SinkConnector: Send + Sync {
     }
 
     /// Optional: Health check implementation
-    ///
     /// This method is called periodically to verify the connector is healthy.
     /// Check connectivity to external systems and return an error if unhealthy.
     async fn health_check(&self) -> ConnectorResult<()> {
@@ -159,7 +153,7 @@ pub trait SinkConnector: Send + Sync {
 /// # Example
 ///
 /// ```rust,no_run
-/// use danube_connect_core::{SourceConnector, SourceRecord, ConnectorConfig, ConnectorResult, Offset, ProducerConfig};
+/// use danube_connect_core::{SourceConnector, SourceEnvelope, ConnectorConfig, ConnectorResult, Offset, ProducerConfig};
 /// use async_trait::async_trait;
 /// use std::env;
 ///
@@ -184,7 +178,7 @@ pub trait SinkConnector: Send + Sync {
 ///         ])
 ///     }
 ///     
-///     async fn poll(&mut self) -> ConnectorResult<Vec<SourceRecord>> {
+///     async fn poll(&mut self) -> ConnectorResult<Vec<SourceEnvelope>> {
 ///         // Read new lines from file at self.file_path
 ///         Ok(vec![])
 ///     }
@@ -221,10 +215,30 @@ pub trait SourceConnector: Send + Sync {
     /// Vector of `ProducerConfig` objects, one for each destination topic.
     async fn producer_configs(&self) -> ConnectorResult<Vec<ProducerConfig>>;
 
+    /// Select the runtime mode used by this source connector.
+    ///
+    /// Return `SourceConnectorMode::Polling` for connectors that periodically
+    /// fetch data via `poll()`. Return `SourceConnectorMode::Streaming` for
+    /// connectors that push records asynchronously via `start_streaming()`.
+    fn mode(&self) -> SourceConnectorMode {
+        SourceConnectorMode::Polling
+    }
+
+    /// Start a streaming source connector.
+    ///
+    /// Connectors that return `SourceConnectorMode::Streaming` should override
+    /// this method and use the provided `SourceSender` to emit records as they
+    /// become available.
+    async fn start_streaming(&mut self, _sender: SourceSender) -> ConnectorResult<()> {
+        Err(ConnectorError::config(
+            "start_streaming() not implemented for this source connector",
+        ))
+    }
+
     /// Poll for new data from the external system
     ///
     /// This method is called repeatedly in a loop. Return:
-    /// - Non-empty vector of records when data is available
+    /// - Non-empty vector of envelopes when data is available
     /// - Empty vector when no data is available (non-blocking)
     ///
     /// The runtime will handle publishing records to Danube and calling `commit()`
@@ -234,7 +248,11 @@ pub trait SourceConnector: Send + Sync {
     ///
     /// Return `ConnectorError::Retryable` for transient failures
     /// Return `ConnectorError::Fatal` to stop the connector
-    async fn poll(&mut self) -> ConnectorResult<Vec<SourceRecord>>;
+    async fn poll(&mut self) -> ConnectorResult<Vec<SourceEnvelope>> {
+        Err(ConnectorError::config(
+            "poll() not implemented for this source connector",
+        ))
+    }
 
     /// Optional: Commit offset/checkpoint after successful publish
     ///
@@ -258,6 +276,115 @@ pub trait SourceConnector: Send + Sync {
     /// Optional: Health check implementation
     async fn health_check(&self) -> ConnectorResult<()> {
         Ok(())
+    }
+}
+
+/// Execution model for a source connector.
+///
+/// This enum determines how the source connector interacts with the runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceConnectorMode {
+    /// The runtime repeatedly calls `poll()` to fetch new data.
+    Polling,
+    /// The connector pushes new data through `start_streaming()`.
+    Streaming,
+}
+
+/// Handle used by streaming connectors to emit records into the runtime.
+///
+/// This struct provides methods to send records to the runtime for publishing.
+#[derive(Clone)]
+pub struct SourceSender {
+    sender: mpsc::Sender<SourceEnvelope>,
+}
+
+impl SourceSender {
+    /// Create a new `SourceSender` instance.
+    pub(crate) fn new(sender: mpsc::Sender<SourceEnvelope>) -> Self {
+        Self { sender }
+    }
+
+    /// Send a single record envelope to the runtime.
+    ///
+    /// This method is used by streaming connectors to emit records as they become
+    /// available.
+    pub async fn send(&self, envelope: impl Into<SourceEnvelope>) -> ConnectorResult<()> {
+        self.sender
+            .send(envelope.into())
+            .await
+            .map_err(|e| ConnectorError::fatal(format!("failed to emit source envelope: {}", e)))
+    }
+
+    /// Send multiple record envelopes to the runtime in sequence.
+    ///
+    /// This method is used by streaming connectors to emit multiple records at
+    /// once.
+    pub async fn send_batch<I>(&self, envelopes: I) -> ConnectorResult<()>
+    where
+        I: IntoIterator,
+        I::Item: Into<SourceEnvelope>,
+    {
+        for envelope in envelopes {
+            self.send(envelope).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Return `true` when the receiving side of the runtime channel is closed.
+    pub fn is_closed(&self) -> bool {
+        self.sender.is_closed()
+    }
+}
+
+/// A source record together with optional checkpoint information.
+///
+/// This struct represents a single record emitted by a source connector, along
+/// with optional checkpoint information.
+#[derive(Debug, Clone)]
+pub struct SourceEnvelope {
+    /// The record to publish to Danube.
+    pub record: SourceRecord,
+    /// Optional offset/checkpoint to commit after successful publish.
+    pub offset: Option<Offset>,
+}
+
+impl SourceEnvelope {
+    /// Create an envelope without checkpoint information.
+    pub fn new(record: SourceRecord) -> Self {
+        Self {
+            record,
+            offset: None,
+        }
+    }
+
+    /// Create an envelope with an offset to commit after successful delivery.
+    pub fn with_offset(record: SourceRecord, offset: Offset) -> Self {
+        Self {
+            record,
+            offset: Some(offset),
+        }
+    }
+
+    /// Borrow the record carried by this envelope.
+    pub fn record(&self) -> &SourceRecord {
+        &self.record
+    }
+
+    /// Borrow the offset carried by this envelope, if present.
+    pub fn offset(&self) -> Option<&Offset> {
+        self.offset.as_ref()
+    }
+
+    /// Split this envelope into its record and optional offset parts.
+    pub fn into_parts(self) -> (SourceRecord, Option<Offset>) {
+        (self.record, self.offset)
+    }
+}
+
+impl From<SourceRecord> for SourceEnvelope {
+    fn from(record: SourceRecord) -> Self {
+        Self::new(record)
     }
 }
 

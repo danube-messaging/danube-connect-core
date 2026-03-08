@@ -6,12 +6,15 @@ use thiserror::Error;
 /// Serialization errors
 #[derive(Error, Debug)]
 pub enum SerializationError {
+    /// JSON serialization or deserialization failed.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
+    /// UTF-8 decoding failed.
     #[error("UTF-8 error: {0}")]
     Utf8(#[from] std::str::Utf8Error),
 
+    /// The requested conversion does not match the underlying data format.
     #[error("Invalid format: {0}")]
     InvalidFormat(String),
 }

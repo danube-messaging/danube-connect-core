@@ -5,11 +5,13 @@
 
 use crate::retry::{RetryConfig, RetryStrategy};
 use crate::{
-    ConnectorConfig, ConnectorError, ConnectorMetrics, ConnectorResult, SinkConnector, SinkRecord,
+    Batcher, ConnectorConfig, ConnectorError, ConnectorMetrics, ConnectorResult, HealthChecker,
+    HealthStatus, SinkConnector, SinkRecord,
 };
 use danube_client::DanubeClient;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tracing::{debug, error, info, warn};
@@ -23,6 +25,12 @@ pub(crate) struct ConsumerStream {
     pub(crate) expected_schema_subject: Option<String>,
 }
 
+struct PendingSinkRecord {
+    stream_index: usize,
+    message: danube_core::message::StreamMessage,
+    record: SinkRecord,
+}
+
 /// Runtime for Sink Connectors (Danube → External System)
 ///
 /// Manages multiple consumers dynamically, one per source topic.
@@ -34,6 +42,7 @@ pub struct SinkRuntime<C: SinkConnector> {
     metrics: Arc<ConnectorMetrics>,
     retry_strategy: RetryStrategy,
     shutdown: Arc<AtomicBool>,
+    health_checker: HealthChecker,
     /// Shared context with schema client and caching
     context: Arc<crate::runtime::ConnectorContext>,
 }
@@ -43,6 +52,8 @@ impl<C: SinkConnector> SinkRuntime<C> {
     pub async fn new(connector: C, config: ConnectorConfig) -> ConnectorResult<Self> {
         // Validate configuration
         config.validate()?;
+
+        ConnectorMetrics::initialize_exporter(config.processing.metrics_port)?;
 
         // Initialize tracing
         Self::init_tracing(&config);
@@ -71,6 +82,7 @@ impl<C: SinkConnector> SinkRuntime<C> {
 
         // Create connector context
         let context = Arc::new(crate::runtime::ConnectorContext::new(client.clone()));
+        let health_check_failure_threshold = config.processing.health_check_failure_threshold;
 
         Ok(Self {
             connector,
@@ -79,6 +91,7 @@ impl<C: SinkConnector> SinkRuntime<C> {
             metrics,
             retry_strategy,
             shutdown: Arc::new(AtomicBool::new(false)),
+            health_checker: HealthChecker::new(health_check_failure_threshold),
             context,
         })
     }
@@ -163,7 +176,7 @@ impl<C: SinkConnector> SinkRuntime<C> {
                 .with_consumer_name(&consumer_cfg.consumer_name)
                 .with_subscription(&consumer_cfg.subscription)
                 .with_subscription_type(consumer_cfg.subscription_type.clone().into())
-                .build();
+                .build()?;
 
             consumer.subscribe().await.map_err(|e| {
                 ConnectorError::fatal_with_source(
@@ -199,36 +212,57 @@ impl<C: SinkConnector> SinkRuntime<C> {
         Ok(streams)
     }
 
-
     /// Main message processing loop
     async fn process_messages(&mut self, streams: &mut [ConsumerStream]) -> ConnectorResult<()> {
         info!("Entering main processing loop");
+        let mut pending_batch = Batcher::new(
+            self.config.processing.batch_size,
+            Duration::from_millis(self.config.processing.batch_timeout_ms),
+        );
+        let health_check_interval =
+            std::time::Duration::from_millis(self.config.processing.health_check_interval_ms);
+        let mut last_health_check = Instant::now();
 
         loop {
             if self.shutdown.load(Ordering::Relaxed) {
                 break;
             }
 
-            let mut has_activity = false;
+            if last_health_check.elapsed() >= health_check_interval {
+                self.run_health_check().await?;
+                last_health_check = Instant::now();
+            }
 
-            for consumer_stream in streams.iter_mut() {
+            for stream_index in 0..streams.len() {
+                let recv_result = {
+                    let consumer_stream = &mut streams[stream_index];
+
+                    tokio::time::timeout(
+                        std::time::Duration::from_millis(10),
+                        consumer_stream.stream.recv(),
+                    )
+                    .await
+                };
+
                 // Non-blocking check for messages (short timeout to avoid accumulation)
-                match tokio::time::timeout(
-                    std::time::Duration::from_millis(10),
-                    consumer_stream.stream.recv(),
-                )
-                .await
-                {
+                match recv_result {
                     Ok(Some(msg)) => {
-                        has_activity = true;
                         self.metrics.record_received();
+
+                        let (logical_topic, expected_schema_subject) = {
+                            let consumer_stream = &streams[stream_index];
+                            (
+                                consumer_stream.topic.clone(),
+                                consumer_stream.expected_schema_subject.clone(),
+                            )
+                        };
 
                         // Convert StreamMessage to SinkRecord with schema-aware deserialization
                         // Use the logical topic from subscription, not from message's partition topic
                         let record = match SinkRecord::from_stream_message(
                             &msg,
-                            &consumer_stream.topic,  // Logical topic from subscription
-                            &consumer_stream.expected_schema_subject,
+                            &logical_topic,
+                            &expected_schema_subject,
                             &self.context,
                         )
                         .await
@@ -244,27 +278,15 @@ impl<C: SinkConnector> SinkRuntime<C> {
 
                         debug!(
                             "Processing message from topic {}: has_schema={}",
-                            consumer_stream.topic,
+                            logical_topic,
                             record.schema().is_some()
                         );
 
-                        // Process with retry logic
-                        match self.process_with_retry(record).await {
-                            Ok(_) => {
-                                // Acknowledge successful processing
-                                if let Err(e) = consumer_stream.consumer.ack(&msg).await {
-                                    error!("Failed to acknowledge message: {}", e);
-                                } else {
-                                    self.metrics.record_success();
-                                    debug!("Message acknowledged");
-                                }
-                            }
-                            Err(e) => {
-                                error!("Failed to process message after retries: {}", e);
-                                self.metrics.record_error(&format!("{:?}", e));
-                                // TODO: Implement dead-letter queue logic
-                            }
-                        }
+                        pending_batch.add(PendingSinkRecord {
+                            stream_index,
+                            message: msg,
+                            record,
+                        });
                     }
                     Ok(None) => {
                         // Channel closed
@@ -275,34 +297,48 @@ impl<C: SinkConnector> SinkRuntime<C> {
                 }
             }
 
-            // If no activity, check for pending flushes
-            if !has_activity {
-                // Trigger periodic flush check for time-based flushing
-                // With 10ms timeout per stream, flush checks happen every ~(N×10ms + 100ms)
-                // where N is the number of consumer streams
-                if let Err(e) = self.connector.process_batch(vec![]).await {
-                    error!("Error during periodic flush check: {}", e);
-                }
-
-                // Sleep 100ms between check cycles to maintain reasonable flush check frequency
-                // This ensures flush checks happen approximately every 100ms regardless of stream count
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if pending_batch.should_flush() {
+                self.flush_pending_batch(streams, &mut pending_batch)
+                    .await?;
             }
+
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
+        Ok(())
+    }
+
+    async fn flush_pending_batch(
+        &mut self,
+        streams: &mut [ConsumerStream],
+        pending_batch: &mut Batcher<PendingSinkRecord>,
+    ) -> ConnectorResult<()> {
+        if pending_batch.is_empty() {
+            return Ok(());
+        }
+
+        let pending = pending_batch.flush();
+        let batch_size = pending.len();
+        let batch_records: Vec<SinkRecord> = pending
+            .iter()
+            .map(|pending_record| pending_record.record.clone())
+            .collect();
+
+        self.metrics.record_batch_size(batch_size);
+
+        self.process_batch_with_retry(batch_records).await?;
+        self.ack_pending_records(streams, pending).await;
 
         Ok(())
     }
 
-    /// Process a record with retry logic
-    async fn process_with_retry(&mut self, record: SinkRecord) -> ConnectorResult<()> {
+    async fn process_batch_with_retry(&mut self, records: Vec<SinkRecord>) -> ConnectorResult<()> {
         let start = Instant::now();
         let mut attempt = 0;
 
         loop {
-            match self.connector.process(record.clone()).await {
-                Ok(_) => {
-                    let duration = start.elapsed();
-                    self.metrics.record_processing_time(duration);
+            match self.connector.process_batch(records.clone()).await {
+                Ok(()) => {
+                    self.metrics.record_processing_time(start.elapsed());
                     return Ok(());
                 }
                 Err(e) if e.is_retryable() && self.retry_strategy.should_retry(attempt) => {
@@ -311,20 +347,68 @@ impl<C: SinkConnector> SinkRuntime<C> {
 
                     let backoff = self.retry_strategy.calculate_backoff(attempt);
                     warn!(
-                        "Retry attempt {} after {:?} - error: {}",
+                        "Batch retry attempt {} after {:?} - error: {}",
                         attempt, backoff, e
                     );
 
                     tokio::time::sleep(backoff).await;
                 }
-                Err(e) if e.is_invalid_data() => {
-                    // Skip invalid messages
-                    warn!("Skipping invalid message: {}", e);
-                    return Ok(());
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    async fn ack_pending_records(
+        &mut self,
+        streams: &mut [ConsumerStream],
+        pending: Vec<PendingSinkRecord>,
+    ) {
+        for pending_record in pending {
+            if let Some(stream) = streams.get_mut(pending_record.stream_index) {
+                if let Err(e) = stream.consumer.ack(&pending_record.message).await {
+                    error!("Failed to acknowledge message: {}", e);
+                    self.metrics.record_error("ack_failure");
+                } else {
+                    self.metrics.record_success();
+                    debug!("Message acknowledged");
                 }
-                Err(e) => {
-                    return Err(e);
+            } else {
+                error!(
+                    "Invalid stream index {} while acknowledging message",
+                    pending_record.stream_index
+                );
+                self.metrics.record_error("ack_stream_not_found");
+            }
+        }
+    }
+
+    /// Run health check
+    async fn run_health_check(&mut self) -> ConnectorResult<()> {
+        match self.connector.health_check().await {
+            Ok(()) => {
+                self.health_checker.record_success();
+                self.metrics.set_health(true);
+                Ok(())
+            }
+            Err(e) => {
+                self.health_checker.record_failure();
+                self.metrics
+                    .set_health(self.health_checker.status() != HealthStatus::Unhealthy);
+
+                if self.health_checker.status() == HealthStatus::Unhealthy {
+                    return Err(ConnectorError::fatal(format!(
+                        "Connector health check failed {} consecutive times: {}",
+                        self.health_checker.consecutive_failures(),
+                        e
+                    )));
                 }
+
+                warn!(
+                    "Connector health check failed (attempt {}): {}",
+                    self.health_checker.consecutive_failures(),
+                    e
+                );
+                Ok(())
             }
         }
     }

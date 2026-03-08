@@ -46,51 +46,54 @@ impl SinkConnector for SchemaSinkConnector {
         }])
     }
 
-    async fn process(&mut self, record: SinkRecord) -> ConnectorResult<()> {
-        self.message_count += 1;
+    async fn process_batch(&mut self, records: Vec<SinkRecord>) -> ConnectorResult<()> {
+        for record in records {
+            self.message_count += 1;
 
-        println!("=== Message #{} ===", self.message_count);
-        println!("Topic: {}", record.topic());
-        println!("Producer: {}", record.producer_name());
-        println!("Publish Time: {}", record.publish_time());
+            println!("=== Message #{} ===", self.message_count);
+            println!("Topic: {}", record.topic());
+            println!("Producer: {}", record.producer_name());
+            println!("Publish Time: {}", record.publish_time());
 
-        // Check schema - should always be present with schema registry
-        match record.schema() {
-            Some(schema) => {
-                println!("✓ Schema validated!");
-                println!("  Subject: {}", schema.subject);
-                println!("  Version: {}", schema.version);
-                println!("  Type: {}", schema.schema_type);
-                
-                // Verify it's the expected type
-                if schema.schema_type.to_lowercase() != "string" {
-                    println!("⚠ WARNING: Expected String schema, got {}", schema.schema_type);
+            match record.schema() {
+                Some(schema) => {
+                    println!("✓ Schema validated!");
+                    println!("  Subject: {}", schema.subject);
+                    println!("  Version: {}", schema.version);
+                    println!("  Type: {}", schema.schema_type);
+
+                    if schema.schema_type.to_lowercase() != "string" {
+                        println!(
+                            "⚠ WARNING: Expected String schema, got {}",
+                            schema.schema_type
+                        );
+                    }
+                }
+                None => {
+                    println!("⚠ WARNING: No schema found! Expected test-schema-value");
                 }
             }
-            None => {
-                println!("⚠ WARNING: No schema found! Expected test-schema-value");
+
+            let payload = record.payload();
+
+            if let Some(text) = payload.as_str() {
+                println!("Payload: {}", text);
+            } else {
+                println!(
+                    "⚠ Payload type mismatch! Expected string, got: {:?}",
+                    payload
+                );
             }
-        }
 
-        // Payload is already deserialized by runtime based on schema type
-        let payload = record.payload();
-        
-        // Since schema type is String, payload should be a JSON string
-        if let Some(text) = payload.as_str() {
-            println!("Payload: {}", text);
-        } else {
-            println!("⚠ Payload type mismatch! Expected string, got: {:?}", payload);
-        }
-
-        // Print attributes
-        if !record.attributes().is_empty() {
-            println!("Attributes:");
-            for (key, value) in record.attributes() {
-                println!("  {} = {}", key, value);
+            if !record.attributes().is_empty() {
+                println!("Attributes:");
+                for (key, value) in record.attributes() {
+                    println!("  {} = {}", key, value);
+                }
             }
-        }
 
-        println!();
+            println!();
+        }
 
         Ok(())
     }

@@ -60,9 +60,7 @@ impl ConnectorContext {
         }
 
         // Create new schema registry client
-        let client = SchemaRegistryClient::new(&self.client).await.map_err(|e| {
-            ConnectorError::fatal(format!("Failed to create schema registry client: {}", e))
-        })?;
+        let client = self.client.schema();
 
         *lock = Some(client.clone());
 
@@ -95,7 +93,7 @@ impl ConnectorContext {
             schema_id
         );
 
-        let mut client = self.schema_client().await?;
+        let client = self.schema_client().await?;
         let schema = client.get_schema_by_id(schema_id).await.map_err(|e| {
             ConnectorError::invalid_data(
                 format!("Failed to fetch schema ID {}: {}", schema_id, e),

@@ -67,13 +67,19 @@ impl RetryConfig {
     }
 
     /// Disable jitter
+    ///
+    /// By default, jitter is enabled to avoid the thundering herd problem.
+    /// This method allows you to disable jitter if you prefer a deterministic backoff.
     #[allow(dead_code)]
     pub fn without_jitter(mut self) -> Self {
         self.jitter = false;
         self
     }
 
-    /// Set custom multiplier
+    /// Set the exponential backoff multiplier used between retry attempts.
+    ///
+    /// The default multiplier is 2.0, which means the backoff duration will double between each retry attempt.
+    /// You can adjust this value to change the rate at which the backoff duration increases.
     #[allow(dead_code)]
     pub fn with_multiplier(mut self, multiplier: f64) -> Self {
         self.multiplier = multiplier;

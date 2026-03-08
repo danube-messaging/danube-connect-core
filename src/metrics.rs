@@ -1,7 +1,14 @@
 //! Metrics and observability for connectors.
 
+use crate::{ConnectorError, ConnectorResult};
 use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
+use metrics_exporter_prometheus::PrometheusBuilder;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::OnceLock;
 use std::time::Duration;
+
+static METRICS_EXPORTER_PORT: OnceLock<u16> = OnceLock::new();
+static METRICS_EXPORTER_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 
 /// Metrics collector for connectors
 ///
@@ -16,6 +23,39 @@ pub struct ConnectorMetrics {
 }
 
 impl ConnectorMetrics {
+    /// Initialize the global Prometheus exporter on the given port.
+    ///
+    /// This method is idempotent for the same port and returns an error if the
+    /// exporter was already initialized on a different port.
+    pub fn initialize_exporter(port: u16) -> ConnectorResult<()> {
+        let existing_port = METRICS_EXPORTER_PORT.get_or_init(|| port);
+        if *existing_port != port {
+            return Err(ConnectorError::config(format!(
+                "metrics exporter already initialized on port {}, cannot reinitialize on port {}",
+                existing_port, port
+            )));
+        }
+
+        let init_result = METRICS_EXPORTER_INIT.get_or_init(|| {
+            let listen_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
+
+            PrometheusBuilder::new()
+                .with_http_listener(listen_addr)
+                .install()
+                .map_err(|e| {
+                    format!(
+                        "failed to install Prometheus metrics exporter on {}: {}",
+                        listen_addr, e
+                    )
+                })
+        });
+
+        match init_result {
+            Ok(()) => Ok(()),
+            Err(message) => Err(ConnectorError::fatal(message.clone())),
+        }
+    }
+
     /// Create a new metrics collector
     pub fn new(connector_name: impl Into<String>, topic: impl Into<String>) -> Self {
         let connector_name = connector_name.into();
@@ -174,6 +214,9 @@ impl ConnectorMetrics {
 }
 
 /// Timer for tracking processing duration
+///
+/// This timer starts immediately when created and increments the inflight gauge.
+/// When stopped, it records the elapsed duration and decrements the inflight count.
 #[allow(dead_code)]
 pub struct ProcessingTimer {
     start: std::time::Instant,
@@ -182,7 +225,7 @@ pub struct ProcessingTimer {
 
 #[allow(dead_code)]
 impl ProcessingTimer {
-    /// Create a new timer
+    /// Create a timer that starts immediately and increments the inflight gauge.
     pub fn new(metrics: ConnectorMetrics) -> Self {
         metrics.increment_inflight();
         Self {
@@ -191,7 +234,7 @@ impl ProcessingTimer {
         }
     }
 
-    /// Stop the timer and record the duration
+    /// Stop the timer, record the elapsed duration, and decrement inflight count.
     pub fn stop(self) {
         let duration = self.start.elapsed();
         self.metrics.record_processing_time(duration);

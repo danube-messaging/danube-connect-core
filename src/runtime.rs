@@ -20,5 +20,7 @@ mod source_runtime;
 pub(crate) use context::ConnectorContext;
 
 // Re-export public API types
+/// Runtime for sink connectors that consume from Danube and write to external systems.
 pub use sink_runtime::SinkRuntime;
+/// Runtime for source connectors that read from external systems and publish to Danube.
 pub use source_runtime::SourceRuntime;
